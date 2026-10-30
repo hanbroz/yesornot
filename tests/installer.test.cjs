@@ -10,7 +10,7 @@ const { createPackage } = require('@electron/asar');
 
 test('installer identity, per-user upgrade and public feed remain stable', () => {
   assert.equal(config.appId, 'ai.typesafe.yesornot');
-  assert.equal(config.productName, 'YESORNOT');
+  assert.equal(config.productName, 'YES or NO');
   assert.equal(config.nsis.perMachine, false);
   assert.equal(config.nsis.allowElevation, false);
   assert.equal(config.nsis.runAfterFinish, false);

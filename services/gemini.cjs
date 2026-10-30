@@ -27,13 +27,13 @@ function failure(code, message) {
 }
 
 function validateOptions({ apiKey, model = DEFAULT_MODEL } = {}) {
-  if (typeof apiKey !== 'string' || !apiKey.trim()) throw failure('NOT_CONFIGURED', 'Gemini API 키가 설정되지 않았습니다. 프로젝트 .env에 GEMINI_API_KEY를 설정하고 run.bat을 다시 실행해 주세요.');
+  if (typeof apiKey !== 'string' || !apiKey.trim()) throw failure('NOT_CONFIGURED', 'Gemini API 키를 입력하고 저장해 주세요.');
   const key = apiKey.trim();
   // Google-issued keys are opaque: newer auth keys can contain a period.
   // Reject unsafe header values locally; let Google validate the credential itself.
   if (key.length > 4096 || /[^\x21-\x7E]/.test(key)) throw failure('INVALID_API_KEY', 'Gemini API 키에 공백이나 잘못된 문자가 포함되어 있는지 확인해 주세요.');
   if (typeof model !== 'string' || !/^gemini-[a-z0-9][a-z0-9._-]{0,119}$/.test(model)) {
-    throw failure('INVALID_MODEL', 'Gemini 모델 이름이 올바르지 않습니다. GEMINI_MODEL 설정을 확인해 주세요.');
+    throw failure('INVALID_MODEL', 'Gemini 모델 이름이 올바르지 않습니다. 연결 설정에서 모델을 다시 선택해 주세요.');
   }
   return { key, model };
 }
@@ -94,7 +94,7 @@ async function requestJson(suffix, { key, signal, timeoutMs = DEFAULT_TIMEOUT_MS
   const operation = async () => {
     let response;
     try {
-      response = await fetchImpl(API_ROOT + suffix, {
+      response = await fetchImpl((suffix.startsWith('?') ? API_ROOT.slice(0, -1) : API_ROOT) + suffix, {
         method, redirect: 'error', signal: controller.signal,
         headers: { 'x-goog-api-key': key, ...(body ? { 'Content-Type': 'application/json' } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}),
@@ -110,7 +110,7 @@ async function requestJson(suffix, { key, signal, timeoutMs = DEFAULT_TIMEOUT_MS
     const data = await readJsonBounded(response, limit, controller.signal);
     if (!response.ok || data?.error) {
       const invalidKey = data?.error?.details?.some?.(item => item.reason === 'API_KEY_INVALID') || /api.?key.*(?:not valid|invalid|expired)/i.test(String(data?.error?.message || ''));
-      if (invalidKey) throw failure('AUTH_REQUIRED', 'Gemini API 키가 유효하지 않습니다. 프로젝트 .env의 GEMINI_API_KEY를 확인하고 run.bat을 다시 실행해 주세요.');
+      if (invalidKey) throw failure('AUTH_REQUIRED', 'Gemini API 키가 유효하지 않습니다. 연결 설정에서 키를 다시 입력해 주세요.');
       throw failure('API_ERROR', `Gemini API 요청을 완료하지 못했습니다 (HTTP ${response.status}). 모델과 프로젝트 설정을 확인해 주세요.`);
     }
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw failure('INVALID_RESPONSE', 'Gemini API 응답 형식이 올바르지 않습니다.');
@@ -137,7 +137,15 @@ async function inspectConnection(options = {}) {
       throw failure('INVALID_RESPONSE', 'Gemini 모델 정보를 확인하지 못했습니다.');
     }
     if (!data.supportedGenerationMethods.includes('generateContent')) throw failure('MODEL_UNAVAILABLE', '설정한 Gemini 모델은 텍스트 의견 생성을 지원하지 않습니다.');
-    return { ...base, authenticated: true, version: model, message: 'Gemini API 키와 모델 접근을 확인했습니다. 요금제와 무료 한도는 Google AI Studio에서 확인해 주세요.', reason: 'READY', action: 'none' };
+    let models = [model];
+    try {
+      const list = await requestJson('?pageSize=1000', { ...options, key, timeoutMs: options.timeoutMs ?? 15000 });
+      const names = (Array.isArray(list.models) ? list.models : [])
+        .filter(entry => Array.isArray(entry?.supportedGenerationMethods) && entry.supportedGenerationMethods.includes('generateContent'))
+        .map(entry => String(entry.name).replace(/^models\//, '')).filter(name => /^gemini-[a-z0-9][a-z0-9._-]{0,119}$/.test(name));
+      models = [...new Set([model, ...names])];
+    } catch { /* The selected model was already verified; the list is optional. */ }
+    return { ...base, authenticated: true, version: model, models, message: 'Gemini API 키와 모델 접근을 확인했습니다. 요금제와 무료 한도는 Google AI Studio에서 확인해 주세요.', reason: 'READY', action: 'none' };
   } catch (error) {
     return { ...base,
       authenticated: ['NOT_CONFIGURED', 'INVALID_API_KEY', 'AUTH_REQUIRED'].includes(error.code) ? false : null,

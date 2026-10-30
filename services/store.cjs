@@ -8,7 +8,8 @@ function validateSettings(value) {
   if (!value || typeof value.model !== 'string' || !/^jev-[a-zA-Z0-9._-]{1,64}$/.test(value.model) || ![120000,180000,300000].includes(value.timeoutMs)) {
     throw new Error('모델 또는 제한 시간이 올바르지 않습니다.');
   }
-  return { model: value.model, timeoutMs: value.timeoutMs };
+  if (value.geminiModel !== undefined && (typeof value.geminiModel !== 'string' || !/^gemini-[a-z0-9][a-z0-9._-]{0,119}$/.test(value.geminiModel))) throw new Error('Gemini 모델이 올바르지 않습니다.');
+  return { model: value.model, timeoutMs: value.timeoutMs, ...(value.geminiModel ? { geminiModel: value.geminiModel } : {}) };
 }
 const MAX_BYTES = 25 * 1024 * 1024;
 const finite = n => typeof n === 'number' && Number.isFinite(n);

@@ -28,8 +28,11 @@ test('connection inspection authenticates a metadata GET without generating cont
     calls.push({ url, options });
     return json({ name: `models/${DEFAULT_MODEL}`, supportedGenerationMethods: ['generateContent', 'countTokens'] });
   } });
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.equal(calls[0].url, `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_MODEL}`);
+  assert.equal(calls[1].url, 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000');
+  assert.ok(calls.every(call => call.options.method === 'GET' && call.options.body === undefined));
+  assert.deepEqual(result.models, [DEFAULT_MODEL]);
   assert.equal(calls[0].options.method, 'GET');
   assert.equal(calls[0].options.body, undefined);
   assert.equal(calls[0].options.headers['x-goog-api-key'], KEY);
@@ -47,7 +50,7 @@ test('opaque auth keys with a period and other header-safe characters reach Goog
     assert.equal(options.headers['x-goog-api-key'], key);
     return json({ name: `models/${DEFAULT_MODEL}`, supportedGenerationMethods: ['generateContent'] });
   } });
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   assert.equal(result.authenticated, true);
   assert.equal(result.reason, 'READY');
   const generated = await getOpinion('작게 시험해 볼까요?', { apiKey: key, fetchImpl: async (_url, options) => {

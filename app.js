@@ -14,7 +14,17 @@ const SAMPLES = {
   meeting: '우리 팀에 회의 없는 수요일을 도입해도 될까요? 긴급 대응은 유지하고, 일반 진행 상황은 문서로 공유하려고 합니다.'
 };
 let history = [];
-let connections = { providers: [], jev: { configured: false, connected: false, models: [], message: '확인 전' } };
+let connections = { providers: [], jev: null };
+const CONNECTIONS = [
+  { id: 'claude', title: 'Claude CLI', kind: 'cli', icon: 'claude-avatar', symbol: '✳' },
+  { id: 'codex', title: 'ChatGPT · Codex CLI', kind: 'cli', icon: 'gpt-avatar', symbol: 'G' },
+  { id: 'gemini', title: 'Gemini · API', kind: 'api', icon: 'gemini-avatar', symbol: '✦' },
+  { id: 'jev', title: 'JEV 평가 · API', kind: 'api', icon: 'jev-mark', symbol: 'j.' }
+];
+const connectionCards = {};
+const checkingConnections = new Set();
+const terminalOpened = new Set();
+let geminiModel = '';
 let settings = { model: 'jev-latest', timeoutMs: 180000 };
 let activeId = null;
 let viewed = null;
@@ -26,7 +36,6 @@ let attachments = [];
 let clarificationAnswers = {};
 let clarificationRunId = null;
 let ready = false;
-let refreshPending = false;
 let credentialsPending = false;
 let updatePending = false;
 let updateState = { status: 'disabled', message: '이 실행에서는 자동 업데이트를 사용할 수 없습니다.' };
@@ -141,9 +150,7 @@ function setControls() {
   document.querySelectorAll('#attachment-list button').forEach((button) => { button.disabled = isBusy || attachmentPending; });
   document.querySelectorAll('[data-sample]').forEach((button) => { button.disabled = isBusy; });
   $('save-settings').disabled = !ready || isBusy;
-  $('save-api-keys').disabled = !ready || isBusy || credentialsPending || typeof bridge?.saveApiKeys !== 'function';
-  $('jev-api-key').disabled = isBusy || credentialsPending;
-  $('gemini-api-key').disabled = isBusy || credentialsPending;
+  renderConnections();
   renderUpdateState();
 }
 function storeRecord(record) {
@@ -883,86 +890,176 @@ function showDetail(record, provider, opener) {
   }
   openDialog('detail-dialog', opener);
 }
-function connectionLabel(provider) {
-  if (!provider) return '확인 전';
-  if (provider.transport === 'api') return !provider.configured ? 'API 키 필요' : provider.authenticated === true ? 'API 연결됨' : 'API 연결 확인 필요';
-  if (provider.installed && provider.accessStatus === 'unverified') return '서비스 권한 확인 필요';
-  return !provider.installed ? '미설치' : provider.authenticated === true ? '로그인 확인' : provider.authenticated === false ? '로그인 필요' : '로그인 확인 필요';
+function connectionState(id) { return id === 'jev' ? connections.jev : connections.providers?.find((entry) => entry.id === id); }
+function connectionUsable(id, state = connectionState(id)) {
+  if (!state) return false;
+  return id === 'jev' ? state.connected === true : state.installed !== false && state.authenticated === true;
+}
+function connectionLabel(id) {
+  const state = connectionState(id);
+  if (checkingConnections.has(id)) return '확인 중…';
+  if (!state) return '확인 전';
+  if (connectionUsable(id, state)) return '사용 가능';
+  if (id === 'gemini' || id === 'jev') return state.configured === false ? 'API 키 필요' : '연결 실패';
+  return !state.installed ? '설치 필요' : '로그인 필요';
+}
+function connectionSteps(item, state) {
+  if (item.kind === 'cli') return [['CLI 설치', !!state?.installed], ['터미널에서 로그인', state?.authenticated === true], ['사용 가능', connectionUsable(item.id, state)]];
+  return [['API 키 입력', state?.configured === true], ['모델 선택', !!(item.id === 'jev' ? settings.model : geminiModel)], ['사용 가능 확인', connectionUsable(item.id, state)]];
+}
+function buildConnectionCards() {
+  for (const item of CONNECTIONS) {
+    const card = element('article', 'connection-card');
+    const row = element('div', 'connection-row');
+    const info = element('div', 'connection-info');
+    const ref = { status: element('span', 'connection-state'), message: element('p', ''), steps: element('ol', 'connection-steps'), check: element('button', 'light-button', '다시 확인') };
+    info.append(element('strong', '', item.title), ref.message);
+    row.append(element('span', 'model-icon ' + item.icon, item.symbol), info, ref.status);
+    card.append(row, ref.steps);
+    const actions = element('div', 'connection-actions');
+    if (item.kind === 'cli') {
+      ref.setup = element('button', 'primary-button', 'CLI 설치하기');
+      ref.setup.type = 'button';
+      ref.setup.addEventListener('click', () => setupCli(item.id));
+      actions.append(ref.setup);
+    } else {
+      const fields = element('div', 'connection-fields');
+      const keyField = element('div', 'settings-field');
+      const keyLabel = element('label', '', 'API 키');
+      ref.key = element('input');
+      Object.assign(ref.key, { id: item.id + '-api-key', type: 'password', maxLength: 4096, autocomplete: 'new-password', spellcheck: false, placeholder: '새 키 입력 (비우면 유지)' });
+      ref.key.setAttribute('autocapitalize', 'off');
+      keyLabel.htmlFor = ref.key.id;
+      keyField.append(keyLabel, ref.key);
+      const modelField = element('div', 'settings-field');
+      const modelLabel = element('label', '', '모델');
+      ref.model = element('select');
+      ref.model.id = item.id + '-model';
+      modelLabel.htmlFor = ref.model.id;
+      ref.model.addEventListener('change', () => selectModel(item.id, ref.model.value));
+      modelField.append(modelLabel, ref.model);
+      fields.append(keyField, modelField);
+      card.append(fields);
+      ref.save = element('button', 'primary-button', '저장하고 확인');
+      ref.save.type = 'button';
+      ref.save.addEventListener('click', () => saveAndCheck(item.id));
+      actions.append(ref.save);
+    }
+    ref.check.type = 'button';
+    ref.check.addEventListener('click', () => checkConnection(item.id));
+    actions.append(ref.check);
+    card.append(actions);
+    connectionCards[item.id] = ref;
+    $('connection-cards').append(card);
+  }
 }
 function renderConnections() {
   $('cli-list').replaceChildren();
-  $('connection-cards').replaceChildren();
   for (const provider of PROVIDERS) {
-    const state = connections.providers?.find((entry) => entry.id === provider.id);
     const sidebar = element('div');
-    sidebar.append(element('span', 'tiny-logo ' + provider.color, provider.symbol), document.createTextNode(provider.name), element('span', 'connection-state' + (state?.installed && state?.authenticated === true ? ' is-ok' : state ? ' is-warn' : ''), connectionLabel(state)));
+    sidebar.append(element('span', 'tiny-logo ' + provider.color, provider.symbol), document.createTextNode(provider.name), element('span', 'connection-state' + (connectionUsable(provider.id) ? ' is-ok' : connectionState(provider.id) ? ' is-warn' : ''), connectionLabel(provider.id)));
     $('cli-list').append(sidebar);
-    const row = element('div', 'connection-row');
-    const text = element('div', 'connection-info');
-    text.append(element('strong', '', provider.name + (provider.id === 'gemini' ? ' · API' : provider.id === 'codex' ? ' · Codex CLI' : ' CLI')), element('small', '', [connectionLabel(state), state?.version].filter(Boolean).join(' · ')), element('p', '', state?.message || '연결 상태를 확인해 주세요.'));
-    row.append(element('span', 'model-icon ' + provider.css, provider.symbol), text);
-    if (provider.id !== 'gemini' && state?.installed && state.authenticated !== true) {
-      const loginLabel = state.loginAction === 'open' ? 'CLI 열기' : '로그인';
-      const login = element('button', 'light-button', loginLabel);
-      login.disabled = !ready || busy();
-      login.addEventListener('click', async () => {
-        login.disabled = true;
-        login.textContent = '터미널 여는 중…';
-        try {
-          const result = await bridge.login(provider.id);
-          const notice = state.accessStatus === 'unverified' ? 'Gemini CLI를 열었습니다. Google 인증 성공과 서비스 사용 권한은 별도입니다. unsupported client 오류는 재로그인으로 해결되지 않습니다.' : result.message || '공식 CLI 터미널에서 로그인한 후 연결을 다시 확인하세요.';
-          $('connection-message').textContent = notice;
-          toast(notice);
-        } catch (error) {
-          $('connection-message').textContent = message(error);
-          toast(message(error));
-        } finally { login.textContent = loginLabel; login.disabled = !ready || busy(); }
-      });
-      row.append(login);
-    }
-    $('connection-cards').append(row);
   }
-  const jev = connections.jev || {};
-  const row = element('div', 'connection-row');
-  const text = element('div', 'connection-info');
-  text.append(element('strong', '', 'JEV 평가'), element('small', '', jev.connected ? '연결 확인' : jev.configured ? '키 설정됨 · 연결 확인 필요' : '키 설정 필요'), element('p', '', jev.message || '연결 상태를 확인해 주세요.'));
-  row.append(element('span', 'model-icon jev-mark', 'j.'), text);
-  $('connection-cards').append(row);
-  const models = [...new Set([settings.model, ...(jev.models || [])].filter((entry) => typeof entry === 'string'))];
-  $('jev-model').replaceChildren(...models.map((model) => { const option = element('option', '', model); option.value = model; return option; }));
-  $('jev-model').value = settings.model;
-  $('cli-timeout').value = String(settings.timeoutMs);
+  const locked = !ready || busy() || credentialsPending;
+  for (const item of CONNECTIONS) {
+    const ref = connectionCards[item.id];
+    if (!ref) continue;
+    const state = connectionState(item.id);
+    const checking = checkingConnections.has(item.id);
+    const usable = connectionUsable(item.id, state);
+    ref.status.textContent = connectionLabel(item.id);
+    ref.status.className = 'connection-state' + (usable ? ' is-ok' : state ? ' is-warn' : '');
+    ref.message.textContent = [state?.version, state?.message].filter(Boolean).join(' · ') || '상태를 확인하고 있습니다.';
+    ref.steps.replaceChildren(...connectionSteps(item, state).map(([label, done]) => element('li', done ? 'is-done' : '', label)));
+    ref.check.disabled = locked || checking;
+    if (item.kind === 'cli') {
+      ref.setup.hidden = !state || usable;
+      ref.setup.textContent = state && !state.installed ? 'CLI 설치하기' : '터미널에서 로그인';
+      ref.setup.disabled = locked || checking;
+    } else {
+      const current = item.id === 'jev' ? settings.model : geminiModel;
+      const models = [...new Set([current, ...(state?.models || [])].filter((entry) => typeof entry === 'string' && entry))];
+      if (ref.model.dataset.options !== models.join('\n')) {
+        ref.model.replaceChildren(...models.map((model) => { const option = element('option', '', model); option.value = model; return option; }));
+        ref.model.dataset.options = models.join('\n');
+      }
+      ref.model.value = current;
+      ref.key.disabled = locked;
+      ref.model.disabled = locked || checking;
+      ref.save.disabled = locked || checking;
+    }
+  }
+}
+async function checkConnection(id) {
+  if (!bridge || checkingConnections.has(id)) return;
+  checkingConnections.add(id);
+  renderConnections();
+  try {
+    const result = await bridge.checkConnections(id);
+    connections = id === 'jev' ? { ...connections, jev: result.jev } : { ...connections, providers: [...(connections.providers || []).filter((entry) => entry.id !== id), ...result.providers.filter((entry) => entry.id === id)] };
+    if (connectionUsable(id)) terminalOpened.delete(id);
+  } catch (error) { $('connection-message').textContent = message(error); }
+  finally { checkingConnections.delete(id); renderConnections(); }
+}
+function checkAllConnections() { return Promise.all(CONNECTIONS.map((item) => checkConnection(item.id))); }
+async function setupCli(id) {
+  if (!bridge || busy()) return;
+  const installed = !!connectionState(id)?.installed;
+  const ref = connectionCards[id];
+  ref.setup.disabled = true;
+  try {
+    await bridge.login(id);
+    terminalOpened.add(id);
+    const notice = installed
+      ? '터미널을 열었습니다. 로그인을 마치고 이 창으로 돌아오면 자동으로 다시 확인합니다.'
+      : '터미널에서 CLI 설치와 로그인을 차례로 진행합니다. 끝나고 이 창으로 돌아오면 자동으로 다시 확인합니다.';
+    $('connection-message').textContent = notice;
+    toast(notice);
+  } catch (error) {
+    $('connection-message').textContent = message(error);
+    toast(message(error));
+  } finally { renderConnections(); }
 }
 function clearApiKeyInputs() {
-  $('jev-api-key').value = '';
-  $('gemini-api-key').value = '';
+  for (const item of CONNECTIONS) if (connectionCards[item.id]?.key) connectionCards[item.id].key.value = '';
 }
-async function saveApiKeys(event) {
-  event.preventDefault();
-  if (!ready || busy() || credentialsPending || typeof bridge?.saveApiKeys !== 'function') return;
-  const payload = {};
-  if ($('jev-api-key').value.trim()) payload.jev = $('jev-api-key').value;
-  if ($('gemini-api-key').value.trim()) payload.gemini = $('gemini-api-key').value;
-  if (!Object.keys(payload).length) {
-    $('api-key-message').textContent = '바꾸려는 API 키를 입력해 주세요. 기존 키는 유지됩니다.';
-    $('jev-api-key').focus();
+async function saveAndCheck(id) {
+  if (!bridge || busy() || credentialsPending) return;
+  const ref = connectionCards[id];
+  if (ref.key.value.trim()) {
+    credentialsPending = true;
+    $('connection-message').textContent = 'API 키를 암호화하여 저장하고 있습니다.';
+    setControls();
+    try {
+      await bridge.saveApiKeys({ [id]: ref.key.value });
+      ref.key.value = '';
+      $('connection-message').textContent = 'API 키를 이 PC에 암호화하여 저장했습니다. 사용 가능한지 확인합니다.';
+    } catch {
+      // Do not echo an IPC/provider error that could contain a just-entered key.
+      $('connection-message').textContent = 'API 키를 저장하지 못했습니다. 입력 형식과 Windows 암호화 저장 상태를 확인해 주세요.';
+      return;
+    } finally {
+      credentialsPending = false;
+      setControls();
+    }
+  }
+  await checkConnection(id);
+}
+function settingsPayload(patch = {}) {
+  const next = { model: settings.model, timeoutMs: settings.timeoutMs, ...(geminiModel ? { geminiModel } : {}), ...patch };
+  return next;
+}
+async function selectModel(id, value) {
+  if (!bridge || busy()) return;
+  try {
+    settings = await bridge.saveSettings(settingsPayload(id === 'jev' ? { model: value } : { geminiModel: value }));
+    if (id === 'gemini') geminiModel = value;
+  } catch (error) {
+    $('connection-message').textContent = message(error);
+    renderConnections();
     return;
   }
-  credentialsPending = true;
-  $('api-key-message').textContent = 'API 키를 암호화하여 저장하고 있습니다.';
-  setControls();
-  try {
-    await bridge.saveApiKeys(payload);
-    clearApiKeyInputs();
-    $('api-key-message').textContent = 'API 키를 이 PC에 암호화하여 저장했습니다.';
-    await refreshConnections();
-  } catch {
-    // Do not echo an IPC/provider error that could contain a just-entered key.
-    $('api-key-message').textContent = 'API 키를 저장하지 못했습니다. 입력 형식과 Windows 암호화 저장 상태를 확인해 주세요.';
-  } finally {
-    credentialsPending = false;
-    setControls();
-  }
+  await checkConnection(id);
 }
 function renderUpdateState() {
   const state = updateState;
@@ -991,18 +1088,6 @@ async function installUpdate() {
   try { await bridge.installUpdate(); }
   catch { updateState = { ...updateState, message: '업데이트 설치를 시작하지 못했습니다. 진행 중인 판단이 끝난 뒤 다시 시도해 주세요.' }; }
   finally { updatePending = false; renderUpdateState(); }
-}
-async function refreshConnections() {
-  if (!bridge || refreshPending) return;
-  refreshPending = true;
-  $('refresh-connections').disabled = true;
-  $('connection-message').textContent = '공식 CLI와 JEV 연결을 확인하고 있어요.';
-  try {
-    connections = await bridge.checkConnections();
-    renderConnections();
-    $('connection-message').textContent = '연결 확인이 끝났습니다. Claude·ChatGPT는 CLI 로그인, Gemini는 API 키로 확인합니다. 사용 불가한 AI는 판단에서 제외됩니다.';
-  } catch (error) { $('connection-message').textContent = message(error); }
-  finally { refreshPending = false; $('refresh-connections').disabled = false; }
 }
 async function startRun() {
   if (!bridge || !ready || busy()) return;
@@ -1046,7 +1131,7 @@ function newQuestion() {
 document.querySelectorAll('[data-open]').forEach((button) => button.addEventListener('click', () => openDialog(button.dataset.open, button)));
 document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
 document.querySelectorAll('dialog').forEach((dialog) => {
-  dialog.addEventListener('close', () => { if (dialog.id === 'connection-dialog') { clearApiKeyInputs(); $('api-key-message').textContent = ''; } const opener = dialogOpeners.get(dialog); if (opener?.isConnected) opener.focus(); });
+  dialog.addEventListener('close', () => { if (dialog.id === 'connection-dialog') clearApiKeyInputs(); const opener = dialogOpeners.get(dialog); if (opener?.isConnected) opener.focus(); });
   dialog.addEventListener('click', (event) => { if (event.target === dialog) { const box = dialog.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) dialog.close(); } });
 });
 $('nav-history').addEventListener('click', (event) => openDialog('history-dialog', event.currentTarget));
@@ -1055,8 +1140,7 @@ $('new-question').addEventListener('click', newQuestion);
 $('run-button').addEventListener('click', startRun);
 $('attach-files').addEventListener('click', () => pickAttachments(false));
 $('cancel-run').addEventListener('click', cancelRun);
-$('refresh-connections').addEventListener('click', refreshConnections);
-$('api-key-form').addEventListener('submit', saveApiKeys);
+window.addEventListener('focus', () => { for (const id of terminalOpened) checkConnection(id); });
 $('check-updates').addEventListener('click', checkForUpdates);
 $('install-update').addEventListener('click', installUpdate);
 document.querySelectorAll('[data-sample]').forEach((button) => button.addEventListener('click', () => { if (!busy()) { $('question').value = SAMPLES[button.dataset.sample]; errorText(''); $('question').focus(); } }));
@@ -1070,7 +1154,7 @@ $('settings-form').addEventListener('submit', async (event) => {
   if (!bridge || busy()) return;
   $('save-settings').disabled = true;
   try {
-    settings = await bridge.saveSettings({ model: $('jev-model').value, timeoutMs: Number($('cli-timeout').value) });
+    settings = await bridge.saveSettings(settingsPayload({ timeoutMs: Number($('cli-timeout').value) }));
     $('connection-message').textContent = '설정을 이 기기에 저장했습니다.';
     toast('평가 설정을 저장했습니다.');
   } catch (error) { $('connection-message').textContent = message(error); }
@@ -1082,6 +1166,7 @@ $('copy-result').addEventListener('click', async () => {
   catch (error) { toast(message(error)); }
 });
 async function initialize() {
+  buildConnectionCards();
   renderHistory();
   renderConnections();
   renderEmpty();
@@ -1091,7 +1176,6 @@ async function initialize() {
     $('environment-notice').hidden = false;
     $('environment-notice').textContent = 'HTML 미리보기입니다. 실제 CLI 실행과 평가는 Electron 앱에서 사용할 수 있습니다. 예시 답변이나 점수는 표시하지 않습니다.';
     $('connection-message').textContent = 'Electron 앱에서 연결을 확인할 수 있습니다.';
-    $('refresh-connections').disabled = true;
     setControls();
     return;
   }
@@ -1115,6 +1199,8 @@ async function initialize() {
     history = Array.isArray(state.history) ? state.history : [];
     connections = state.connections || connections;
     settings = state.settings || settings;
+    geminiModel = typeof state.geminiModel === 'string' ? state.geminiModel : geminiModel;
+    $('cli-timeout').value = String(settings.timeoutMs);
     if (state.warning) {
       $('environment-notice').hidden = false;
       $('environment-notice').textContent = state.warning;
@@ -1133,7 +1219,9 @@ async function initialize() {
       try { updateState = await bridge.getUpdateState(); } catch { updateState = { status: 'error', message: '업데이트 상태를 확인하지 못했습니다.' }; }
     }
     setControls();
-    refreshConnections();
+    checkAllConnections();
+    // JEV is required to run a judgment, so a missing key means first-run setup.
+    if (state.needsSetup) openDialog('connection-dialog', $('question'));
   } catch (error) {
     $('environment-label').textContent = '앱 초기화 오류';
     $('environment-notice').hidden = false;

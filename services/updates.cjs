@@ -2,9 +2,9 @@
 
 // The installed NSIS build supplies resources/app-update.yml. Development and
 // portable builds never load the updater or replace their executable in place.
-function createUpdateService({ enabled, currentVersion, getUpdater, isBusy = () => false, onChange = () => {}, intervalMs = 6 * 60 * 60 * 1000, schedule = setInterval, unschedule = clearInterval }) {
-  let state = { status: enabled ? 'idle' : 'disabled', currentVersion, message: enabled ? '새 릴리즈를 자동 확인합니다. 다운로드한 업데이트는 앱 종료 시 적용됩니다.' : '자동 업데이트는 Windows 설치형 앱에서 사용할 수 있습니다.' };
-  let updater, pending, timer, disposed = false;
+function createUpdateService({ enabled, currentVersion, getUpdater, isBusy = () => false, onChange = () => {}, intervalMs = 30 * 60 * 1000, retryMs = 60 * 1000, schedule = setInterval, unschedule = clearInterval }) {
+  let state = { status: enabled ? 'idle' : 'disabled', currentVersion, message: enabled ? '30분마다 새 릴리즈를 확인하고, 받으면 자동으로 다시 시작해 적용합니다.' : '자동 업데이트는 Windows 설치형 앱에서 사용할 수 있습니다.' };
+  let updater, pending, timer, installTimer, disposed = false;
   const listeners = [];
   const snapshot = () => structuredClone(state);
   const publish = patch => { if (!disposed) { state = { ...state, ...patch }; onChange(snapshot()); } };
@@ -24,7 +24,10 @@ function createUpdateService({ enabled, currentVersion, getUpdater, isBusy = () 
     on('update-available', info => publish({ status: 'available', availableVersion: version(info), message: '새 버전을 찾았습니다. 자동으로 다운로드합니다.' }));
     on('update-not-available', () => publish({ status: 'current', availableVersion: undefined, progress: undefined, message: '최신 버전을 사용하고 있습니다.' }));
     on('download-progress', progress => publish({ status: 'downloading', progress: Number.isFinite(progress?.percent) ? Math.min(100, Math.max(0, progress.percent)) : 0, message: '업데이트를 다운로드하고 있습니다. 작업을 계속할 수 있습니다.' }));
-    on('update-downloaded', info => publish({ status: 'downloaded', availableVersion: version(info), progress: 100, message: '다운로드 완료. 앱을 종료하면 업데이트가 적용됩니다. 지금 재시작할 수도 있습니다.' }));
+    on('update-downloaded', info => {
+      publish({ status: 'downloaded', availableVersion: version(info), progress: 100, message: '다운로드 완료. 진행 중인 판단이 없으면 곧 자동으로 다시 시작해 업데이트합니다.' });
+      autoInstall();
+    });
     on('error', errorState);
     return updater;
   }
@@ -47,6 +50,13 @@ function createUpdateService({ enabled, currentVersion, getUpdater, isBusy = () 
     initialize().quitAndInstall(true, true);
     return true;
   }
+  // Apply a downloaded release while the app runs, but never interrupt a judgment.
+  function autoInstall() {
+    clearTimeout(installTimer);
+    if (disposed || state.status !== 'downloaded') return;
+    if (isBusy()) { installTimer = setTimeout(autoInstall, retryMs); installTimer.unref?.(); return; }
+    initialize().quitAndInstall(true, true);
+  }
   function start() {
     if (!enabled || disposed || timer) return;
     void check();
@@ -55,6 +65,7 @@ function createUpdateService({ enabled, currentVersion, getUpdater, isBusy = () 
   }
   function dispose() {
     disposed = true;
+    clearTimeout(installTimer);
     if (timer) unschedule(timer);
     timer = null;
     for (const [event, callback] of listeners) updater.removeListener(event, callback);

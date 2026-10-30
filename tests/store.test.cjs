@@ -36,3 +36,7 @@ test('settings enforce fixed fields and timeout bounds',()=>{
  assert.throws(()=>validateSettings({model:'http://attacker',timeoutMs:180000}));assert.throws(()=>validateSettings({model:'jev-latest',timeoutMs:1}));
  assert.deepEqual(validateSettings({model:'jev-latest',timeoutMs:180000,apiKey:'do-not-store'}),{model:'jev-latest',timeoutMs:180000});
 });
+test('optional Gemini model setting is validated and kept only when present',()=>{
+ assert.deepEqual(validateSettings({model:'jev-latest',timeoutMs:180000,geminiModel:'gemini-2.5-flash'}),{model:'jev-latest',timeoutMs:180000,geminiModel:'gemini-2.5-flash'});
+ assert.throws(()=>validateSettings({model:'jev-latest',timeoutMs:180000,geminiModel:'https://attacker'}));
+});

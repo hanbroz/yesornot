@@ -59,3 +59,13 @@ test('rejected background download is handled and becomes a retryable safe error
   assert.equal(f.service.snapshot().status,'error');assert.ok(!JSON.stringify(f.events).includes('private url'));
   f.service.dispose();
 });
+test('downloaded update installs automatically while idle and waits for a running judgment', async () => {
+  const idle=fixture();await idle.service.check();
+  idle.updater.emit('update-downloaded',{version:'0.2.0'});
+  assert.deepEqual(idle.installs,[[true,true]]);idle.service.dispose();
+  let busy=true;
+  const f=fixture({isBusy:()=>busy,retryMs:5});await f.service.check();
+  f.updater.emit('update-downloaded',{version:'0.2.0'});assert.equal(f.installs.length,0);
+  busy=false;await new Promise(resolve=>setTimeout(resolve,30));
+  assert.deepEqual(f.installs,[[true,true]]);f.service.dispose();
+});

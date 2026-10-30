@@ -21,7 +21,7 @@ const { createAttachmentService } = require('./services/attachments.cjs');
 const { createQuestionnaireFiles } = require('./services/questionnaire-files.cjs');
 const { readBuildInfo } = require('./services/build-version.cjs');
 const buildInfo = readBuildInfo(__dirname);
-const appTitle = 'YESORNOT — JEV Decision Room · ' + (buildInfo ? 'ver. ' + buildInfo.buildVersion : '개발 모드');
+const appTitle = 'YES or NO — JEV Decision Room · ' + (buildInfo ? 'ver. ' + buildInfo.buildVersion : '개발 모드');
 const { createResearchService } = require('./services/research.cjs');
 const researchAdapters = require('./services/research-adapters.cjs');
 const { verifySources, publicUrl } = require('./services/evidence.cjs');
@@ -44,7 +44,7 @@ async function openSource(url) {
   return true;
 }
 
-app.setName('YESORNOT');
+app.setName('YES or NO');
 if (process.platform === 'win32') app.setAppUserModelId('ai.typesafe.yesornot');
 app.setPath('userData', path.join(app.getPath('appData'), 'YESorNOT'));
 const userData = app.getPath('userData');
@@ -91,7 +91,7 @@ async function loadKey() {
   const geminiSecret = await loadSecret({ config, keyName:'GEMINI_API_KEY', fileName:'gemini-key.bin', userData, safeStorage });
   geminiKey = geminiSecret.key;
   geminiKeyMessage = geminiSecret.message;
-  geminiModel = config.GEMINI_MODEL?.trim() || process.env.GEMINI_MODEL?.trim() || gemini.DEFAULT_MODEL;
+  geminiModel = store.snapshot().settings.geminiModel || config.GEMINI_MODEL?.trim() || process.env.GEMINI_MODEL?.trim() || gemini.DEFAULT_MODEL;
   delete process.env.GEMINI_MODEL;
   if (config.JEV_MODEL && store.snapshot().settings.model === 'jev-latest' && /^jev-[a-zA-Z0-9._-]{1,64}$/.test(config.JEV_MODEL)) {
     await store.saveSettings({ ...store.snapshot().settings, model:config.JEV_MODEL });
@@ -110,19 +110,31 @@ async function saveApiKeys(payload) {
   }
   return { configured: { jev:!!apiKey, gemini:!!geminiKey } };
 }
-async function checkConnections() {
-  if (connectionPromise) return connectionPromise;
-  connectionPromise = (async () => {
-    const [localProviders, geminiState, evaluator] = await Promise.all([
-      cli.inspectAll({ cwd:path.join(userData, 'cli-workspace'), providerIds:['claude','codex'] }),
-      gemini.inspectConnection({ apiKey:geminiKey, model:geminiModel }),
-      jev.inspectConnection({ apiKey })
-    ]);
-    const providers = [...localProviders, { ...geminiState, message:[geminiState.message,geminiKeyMessage].filter(Boolean).join(' ') }];
-    connections = { providers, jev:{ ...evaluator, message:[evaluator.message,keyMessage].filter(Boolean).join(' ') } };
-    return connections;
-  })();
-  try { return await connectionPromise; } finally { connectionPromise = null; }
+const CONNECTION_IDS = ['claude','codex','gemini','jev'];
+const pendingChecks = new Set();
+async function inspectConnection(id) {
+  if (id === 'gemini') {
+    const state = await gemini.inspectConnection({ apiKey:geminiKey, model:geminiModel });
+    return { ...state, message:[state.message,geminiKeyMessage].filter(Boolean).join(' ') };
+  }
+  if (id === 'jev') {
+    const state = await jev.inspectConnection({ apiKey });
+    return { ...state, message:[state.message,keyMessage].filter(Boolean).join(' ') };
+  }
+  const [state] = await cli.inspectAll({ cwd:path.join(userData, 'cli-workspace'), providerIds:[id] });
+  return state;
+}
+// Each card is checked on its own; the result replaces only that card's entry.
+async function checkConnections(id) {
+  if (id !== undefined && !CONNECTION_IDS.includes(id)) throw new Error('지원하지 않는 연결입니다.');
+  const check = Promise.all((id === undefined ? CONNECTION_IDS : [id]).map(async name => {
+    const state = await inspectConnection(name);
+    connections = name === 'jev' ? { ...connections, jev:state } : { ...connections, providers:[...connections.providers.filter(entry => entry.id !== name), state] };
+  }));
+  pendingChecks.add(check);
+  connectionPromise = Promise.all([...pendingChecks]);
+  try { await check; return connections; }
+  finally { pendingChecks.delete(check); connectionPromise = pendingChecks.size ? Promise.all([...pendingChecks]) : null; }
 }
 function safeError(error) {
   let message = typeof error?.message === 'string' ? error.message.slice(0,800) : '요청 처리에 실패했습니다.';
@@ -219,8 +231,9 @@ if (startup) app.whenReady().then(async () => {
   if (process.platform === 'win32' && app.isPackaged) {
     const programs = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
     await fs.mkdir(programs, { recursive:true });
-    shell.writeShortcutLink(path.join(programs, 'YESORNOT.lnk'), 'create', {
-      target:process.execPath, cwd:path.dirname(process.execPath), description:'YESORNOT - AI 의견과 JEV 판단',
+    await fs.rm(path.join(programs, 'YESORNOT.lnk'), { force:true });
+    shell.writeShortcutLink(path.join(programs, 'YES or NO.lnk'), 'create', {
+      target:process.execPath, cwd:path.dirname(process.execPath), description:'YES or NO - AI 의견과 JEV 판단',
       icon:process.execPath, iconIndex:0, appUserModelId:'ai.typesafe.yesornot'
     });
   }
@@ -238,7 +251,7 @@ if (startup) app.whenReady().then(async () => {
       service.restore(savedIntake, store.snapshot().settings);
     } catch { /* Keep an invalid historical checkpoint readable without resuming it. */ }
   }
-  handle('decision:state', () => ({ ...store.snapshot(), connections, activeRun:service.active(), buildInfo, appTitle, update:updates.snapshot() }));
+  handle('decision:state', () => ({ ...store.snapshot(), connections, geminiModel, needsSetup:!apiKey, activeRun:service.active(), buildInfo, appTitle, update:updates.snapshot() }));
   handle('decision:connections', checkConnections);
   handle('decision:api-keys', saveApiKeys);
   handle('decision:update-state', () => updates.snapshot());
@@ -262,7 +275,11 @@ if (startup) app.whenReady().then(async () => {
   handle('decision:questionnaire-upload', payload => questionnaireFiles.upload(payload));
   handle('decision:source', openSource);
   handle('decision:cancel', () => service.cancel());
-  handle('decision:settings', async payload => { await store.saveSettings(payload); return store.snapshot().settings; });
+  handle('decision:settings', async payload => {
+    await store.saveSettings(payload);
+    geminiModel = store.snapshot().settings.geminiModel || geminiModel;
+    return store.snapshot().settings;
+  });
   handle('decision:login', login);
   handle('decision:copy', id => {
     const record = store.snapshot().history.find(r => r.id === id) || (lastCompletedRecord?.id === id ? lastCompletedRecord : null);

@@ -2,7 +2,7 @@
 
 module.exports = {
   appId: 'ai.typesafe.yesornot',
-  productName: 'YESORNOT',
+  productName: 'YES or NO',
   directories: { output: 'dist', buildResources: 'assets' },
   asar: true,
   npmRebuild: false,
@@ -32,7 +32,7 @@ module.exports = {
     allowToChangeInstallationDirectory: true,
     createDesktopShortcut: true,
     createStartMenuShortcut: true,
-    shortcutName: 'YESORNOT',
+    shortcutName: 'YES or NO',
     runAfterFinish: false,
     deleteAppDataOnUninstall: false,
     differentialPackage: true,

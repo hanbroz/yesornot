@@ -7,7 +7,7 @@ async function invoke(channel, value) {
 }
 contextBridge.exposeInMainWorld('decisionApp', {
   getState: () => invoke('decision:state'),
-  checkConnections: () => invoke('decision:connections'),
+  checkConnections: id => invoke('decision:connections', id),
   saveApiKeys: payload => invoke('decision:api-keys', payload),
   getUpdateState: () => invoke('decision:update-state'),
   checkForUpdates: () => invoke('decision:update-check'),
