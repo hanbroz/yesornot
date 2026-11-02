@@ -1155,8 +1155,9 @@ $('settings-form').addEventListener('submit', async (event) => {
   $('save-settings').disabled = true;
   try {
     settings = await bridge.saveSettings(settingsPayload({ timeoutMs: Number($('cli-timeout').value) }));
-    $('connection-message').textContent = '설정을 이 기기에 저장했습니다.';
-    toast('평가 설정을 저장했습니다.');
+    $('connection-message').textContent = '';
+    toast('설정을 저장했습니다.');
+    $('connection-dialog').close();
   } catch (error) { $('connection-message').textContent = message(error); }
   finally { setControls(); }
 });
