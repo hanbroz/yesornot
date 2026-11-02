@@ -255,9 +255,28 @@ async function inspectAll({ cwd = path.resolve(__dirname, '..'), providerIds = P
   })));
 }
 
+// Only the CLI's own error messages are classified. Scanning the whole output misread
+// answer text or token counts (e.g. 14290) as a usage limit.
+const CLI_NOISE = /Skill descriptions were shortened|failed to load models cache|failed to load skill|Shell snapshot not supported|unrecognized configuration settings|is ignored\.?$/i;
+function providerMessages(result) {
+  const messages = [];
+  for (const line of String(result.stdout || '').split(/\r?\n/)) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (!event || typeof event !== 'object') continue;
+    const candidates = [event.type === 'error' ? event.message : null, event.type === 'turn.failed' ? event.error?.message : null,
+      event.item?.type === 'error' ? event.item.message : null, event.is_error ? event.result : null, typeof event.error === 'string' ? event.error : event.error?.message];
+    for (const text of candidates) if (typeof text === 'string' && text.trim() && !CLI_NOISE.test(text)) messages.push(text.trim());
+  }
+  for (const line of String(result.stderr || '').split(/\r?\n/)) if (line.trim() && !CLI_NOISE.test(line)) messages.push(line.replace(/^\S+Z\s+(?:ERROR|WARN|INFO)\s+\S+:\s*/, '').trim());
+  return [...new Set(messages)];
+}
 function providerFailure(id, result) {
   const provider = PROVIDERS.find(item => item.id === id);
-  const details = `${result.stderr}\n${result.stdout}`;
+  const messages = providerMessages(result);
+  const details = messages.join('\n');
+  const original = safeMessage(messages.slice(0, 2).join(' / ')).slice(0, 300);
+  const withDetail = error => Object.assign(error, original ? { providerDetail: original, message: `${error.message} (CLI 원문: ${original})` } : {});
   // OAuth can succeed before the service rejects this client or account.
   // Match that rejection before generic authentication output or exit code 41.
   if (id === 'gemini' && /this client is no longer supported|unsupported.?client|migrate to the Antigravity/i.test(details)) {
@@ -267,8 +286,8 @@ function providerFailure(id, result) {
     return processError('Gemini 서비스 이용 권한이 확인되지 않았습니다. Google 로그인과 Code Assist 라이선스는 별도입니다. 계정에 할당된 서비스와 조직 라이선스를 확인하세요.', 'SERVICE_NOT_ENTITLED');
   }
   if ((id === 'gemini' && result.exitCode === 41) || /not logged|login required|authentication|unauthenticated|invalid_grant|login to|log in|authenticate|no refresh token|oauth/i.test(details)) return processError(`${provider.name} 로그인이 필요하거나 만료되었습니다. 공식 CLI에서 다시 로그인해 주세요.`, 'AUTH_REQUIRED');
-  if (/quota|rate.?limit|usage.?limit|429|resource_exhausted/i.test(details)) return processError(`${provider.name} 구독 사용 한도에 도달했습니다. 한도 복구 후 다시 시도해 주세요.`, 'RATE_LIMIT');
-  return processError(`${provider.name} 실행 실패 (종료 코드 ${result.exitCode}). ${safeMessage(result.stderr || result.stdout)}`, 'CLI_FAILED');
+  if (/quota|rate.?limit|usage.?limit|\b429\b|resource_exhausted|too many requests/i.test(details)) return withDetail(processError(`${provider.name} 구독 사용 한도에 도달했습니다. 한도 복구 후 다시 시도해 주세요.`, 'RATE_LIMIT'));
+  return processError(`${provider.name} 실행 실패 (종료 코드 ${result.exitCode}). ${original || safeMessage(result.stderr || result.stdout)}`, 'CLI_FAILED');
 }
 
 async function getOpinion(id, question, { cwd = path.resolve(__dirname, '..'), signal, timeoutMs = 180000, onProgress, prompt, researchContext } = {}) {
@@ -295,4 +314,4 @@ async function getOpinion(id, question, { cwd = path.resolve(__dirname, '..'), s
   });
 }
 
-module.exports = { PROVIDERS, inspectAll, getOpinion, runProcess, runCli, parseOpinion, cleanEnvironment, resolveCli, buildArgs, buildPrompt, safeMessage, prepareGemini, subscriptionAuthenticated, providerFailure };
+module.exports = { providerMessages, PROVIDERS, inspectAll, getOpinion, runProcess, runCli, parseOpinion, cleanEnvironment, resolveCli, buildArgs, buildPrompt, safeMessage, prepareGemini, subscriptionAuthenticated, providerFailure };

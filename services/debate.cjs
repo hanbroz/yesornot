@@ -15,7 +15,7 @@ const SCHEMA = { type: 'object', additionalProperties: false, required: ['stance
 const FIELD_LIMITS = Object.freeze({ title: 500, text: 6000, point: 1500 });
 const FIELD_LABELS = Object.freeze({ title: '제목', text: '본문', point: '핵심 요점' });
 
-function debateError(code, details) {
+function debateError(code, details, providerDetail) {
   const messages = {
     ABORTED: '내부 토론이 취소되었습니다.', TIMEOUT: '내부 토론의 응답 시간이 초과되었습니다.',
     AUTH_REQUIRED: 'AI 인증이 필요하여 내부 토론을 완료하지 못했습니다.',
@@ -47,7 +47,8 @@ function debateError(code, details) {
       }
     }
   }
-  return Object.assign(new Error(message), { code }, validation ? { validation } : {});
+  if (typeof providerDetail === 'string' && providerDetail) message += ` (CLI 원문: ${providerDetail.slice(0, 300)})`;
+  return Object.assign(new Error(message), { code }, validation ? { validation } : {}, providerDetail ? { providerDetail } : {});
 }
 
 function validateOpinion(value, providerId) {
@@ -107,7 +108,7 @@ function createDebateOpinion({ getOpinion }) {
     const fail = (error, context) => {
       if (!failure) {
         const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'PROVIDER_ERROR';
-        failure = debateError(code, error?.validation);
+        failure = debateError(code, error?.validation, error?.providerDetail);
         debate.failure = {
           code,
           stage: context?.stage || ({ drafting: 'draft', reviewing: 'review', synthesizing: 'synthesis' }[debate.phase] || debate.phase),

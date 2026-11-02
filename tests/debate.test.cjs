@@ -238,3 +238,8 @@ test('observer exceptions abort active children and are reported only after clea
   } }), error => error.code === 'PROGRESS_ERROR' && !error.message.includes('observer secret'));
   assert.equal(calls, 1); assert.equal(cleaned, 1);
 });
+
+test('a usage limit inside the debate keeps the CLI original reason in the exclusion message', async () => {
+  const debate = createDebateOpinion({ getOpinion: async () => { throw Object.assign(new Error('limit'), { code: 'RATE_LIMIT', providerDetail: "You've hit your usage limit. Try again at 5:08 PM." }); } });
+  await assert.rejects(debate('codex', question, { timeoutMs: 1000 }), error => error.code === 'RATE_LIMIT' && /사용 한도/.test(error.message) && /CLI 원문: You've hit your usage limit/.test(error.message));
+});

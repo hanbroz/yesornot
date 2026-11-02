@@ -50,7 +50,7 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
       });
       if (run.controller.signal.aborted) throw new Error('취소됨');
       prep.readiness = result.score;
-      prep.interview.rounds.push({ round, score: result.score, questionCount: result.questions.length, assessments: result.assessments });
+      prep.interview.rounds.push({ round, score: result.score, questionCount: result.questions.length, assessments: result.assessments, ...(result.judgeError ? { judgeError: result.judgeError } : {}) });
       if (result.questions.length && !final) {
         prep.questions = result.questions;
         run.record.status = 'awaiting_input';
@@ -59,6 +59,10 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
         if (run.controller.signal.aborted) return;
         emit(run, 'awaiting_input');
         return;
+      }
+      // Moving on below the target is recorded with its reason, never silent.
+      if (Number.isFinite(result.score) && result.score < (prep.interview.target || 90)) {
+        prep.interview.belowTarget = { score: result.score, reason: final ? 'MAX_ROUNDS' : 'NO_QUESTIONS' };
       }
     } catch (error) {
       // Questions that were never shown must not block research.
@@ -74,6 +78,7 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
       }
       // A failed re-score must not discard the answers already collected; research continues.
       prep.interview.error = { code: typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(error.code) ? error.code : 'READINESS_FAILED', message: error?.message || '인터뷰 준비도를 다시 평가하지 못했습니다.' };
+      if (Number.isFinite(prep.readiness) && prep.readiness < (prep.interview.target || 90)) prep.interview.belowTarget = { score: prep.readiness, reason: 'READINESS_FAILED' };
     }
     run.record.status = 'researching';
     await execute(run, settings);

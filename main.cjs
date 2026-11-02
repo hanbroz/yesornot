@@ -117,6 +117,27 @@ async function saveApiKeys(payload) {
 }
 const CONNECTION_IDS = ['claude','codex','gemini','jev','ego'];
 const pendingChecks = new Set();
+// A login check cannot see a subscription's usage limit, so limits met during real
+// runs are remembered and shown on the card until a later run succeeds.
+// ponytail: fixed 5-hour window; parse the CLI's own reset time if it proves reliable.
+const usageLimits = {};
+const LIMIT_WINDOW_MS = 5 * 60 * 60 * 1000;
+function rememberUsageLimits(record) {
+  const at = Date.now();
+  const hit = (providerId, detail) => { usageLimits[providerId] = { at, detail:typeof detail === 'string' ? detail.slice(0, 300) : '' }; };
+  for (const opinion of record.opinions || []) {
+    if (opinion.errorCode === 'RATE_LIMIT') hit(opinion.providerId, opinion.error);
+    else if (opinion.status === 'success') delete usageLimits[opinion.providerId];
+  }
+  for (const plan of record.preparation?.plans || []) if (plan.errorCode === 'RATE_LIMIT') hit(plan.providerId, plan.error);
+  for (const report of record.research?.reports || []) if (report.errorCode === 'RATE_LIMIT' || (report.agents || []).some(agent => agent.errorCode === 'RATE_LIMIT')) hit(report.providerId, '조사 단계에서 사용 한도에 걸렸습니다.');
+}
+function withUsageLimit(id, state) {
+  const limit = usageLimits[id];
+  if (!limit || Date.now() - limit.at > LIMIT_WINDOW_MS) return state;
+  const time = new Date(limit.at).toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit' });
+  return { ...state, limited:{ at:limit.at }, message:`로그인은 되어 있지만 ${time} 판단에서 구독 사용 한도에 걸렸습니다. ${limit.detail} 한도가 풀리면(보통 몇 시간 뒤) 다시 사용할 수 있습니다.` };
+}
 async function inspectConnection(id) {
   if (id === 'gemini') {
     const state = await gemini.inspectConnection({ apiKey:geminiKey, model:geminiModel });
@@ -128,7 +149,7 @@ async function inspectConnection(id) {
   }
   if (id === 'ego') return siteReader.inspectEgo();
   const [state] = await cli.inspectAll({ cwd:path.join(userData, 'cli-workspace'), providerIds:[id] });
-  return state;
+  return withUsageLimit(id, state);
 }
 // Each card is checked on its own; the result replaces only that card's entry.
 async function checkConnections(id) {
@@ -276,7 +297,7 @@ if (startup) app.whenReady().then(async () => {
   session.defaultSession.setPermissionCheckHandler(() => false);
   session.defaultSession.webRequest.onBeforeRequest((details,callback) => callback({ cancel:!details.url.startsWith(pathToFileURL(__dirname + path.sep).href) && !details.url.startsWith('devtools:') }));
   service = createDecisionService({ providers:cli.PROVIDERS, getOpinion:(id, question, options) => id === 'gemini' ? gemini.getOpinion(question, { ...options, apiKey:geminiKey, model:geminiModel }) : getDebatedOpinion(id, question, options), evaluate:evaluateAndSynthesize, researchService, store, getApiKey:() => apiKey, cwd:path.join(userData,'cli-workspace'), onEvent:event => {
-    if (event.type === 'complete') lastCompletedRecord = structuredClone(event.record);
+    if (event.type === 'complete') { lastCompletedRecord = structuredClone(event.record); rememberUsageLimits(event.record); }
     if (window && !window.isDestroyed()) window.webContents.send('decision:event', event);
   } });
   const savedIntake = store.snapshot().history.find(record => record.status === 'awaiting_input' && record.preparation);

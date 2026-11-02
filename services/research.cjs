@@ -452,7 +452,18 @@ function createResearchService({ providers, getStructured, judgePreparation, ver
       // JEV sees the interview so far, so already answered facts are classified as supplied.
       // ponytail: fixed 16,000-character transcript budget; raise if JEV documents a larger request limit.
       const caseText = clip(question + '\n\n[지금까지의 사전 인터뷰]\n' + transcript.map(item => `Q: ${item.question}\nA: ${item.answer || '(답변 없음)'}`).join('\n'), 16000);
-      const judged = await judgeCandidates({ question: caseText, attachments, plans, sourceCandidates, apiKey, model, cwd, signal, timeoutMs, onProgress, total: ids.length });
+      let judged;
+      try {
+        judged = await judgeCandidates({ question: caseText, attachments, plans, sourceCandidates, apiKey, model, cwd, signal, timeoutMs, onProgress, total: ids.length });
+      } catch (error) {
+        if (signal?.aborted || error?.code === 'ABORTED') throw abortError(signal);
+        // Below the target the interview must continue: if JEV cannot structure the
+        // questions, ask the AIs' own (deduplicated) questions instead of skipping the round.
+        const seen = new Set();
+        const questions = sourceCandidates.filter(candidate => !seen.has(questionKey(candidate.question)) && seen.add(questionKey(candidate.question))).slice(0, 8)
+          .map((candidate, index) => ({ id: `r${round}q${index + 1}`, question: candidate.question, why: candidate.why, material: candidate.material, required: candidate.required, providerIds: candidate.providerIds, choice: 'AI_PROPOSED' }));
+        return { round, score, assessments, questions, judgeError: { code: safeCode(error), message: clip(error?.message || 'JEV 질문 정리 실패', 300) } };
+      }
       const questions = pickQuestions(judged.candidates, judged.selected, score).map(item => ({ ...item, id: `r${round}${item.id}` }));
       return { round, score, assessments, questions, consolidation: judged.consolidation, judgment: judged.judgment };
     },

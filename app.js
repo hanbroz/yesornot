@@ -531,7 +531,11 @@ function renderPreparation(record) {
       element('p', 'detail-meta', (waiting ? interviewRound(prep) + '차 질문 · ' : '') + (prep.readiness >= target ? '조사와 토론을 시작할 만큼 정보가 모였습니다.' : '목표에 닿을 때까지 필요한 정보를 차례로 여쭙니다. 최대 ' + (prep.interview?.maxRounds || 5) + '차까지 묻습니다.')));
     panel.append(meter);
   }
-  if (prep?.interview?.error) panel.append(element('p', 'detail-meta', '준비도 재평가 실패로 지금까지의 답변으로 진행했습니다: ' + publicText(prep.interview.error.message)));
+  const below = prep?.interview?.belowTarget;
+  if (below && !waiting) panel.append(element('p', 'form-error', '인터뷰 준비도 ' + below.score + '%로 목표에 못 미친 채 자료 조사로 넘어갔습니다. 사유: ' + ({ MAX_ROUNDS: '최대 ' + (prep.interview.maxRounds || 5) + '차까지 질문했습니다.', NO_QUESTIONS: 'AI와 JEV가 더 물어볼 개인 정보를 찾지 못했습니다. 나머지는 공개 조사와 명시한 가정으로 보완합니다.', READINESS_FAILED: '준비도를 다시 평가하지 못했습니다' + (prep.interview.error ? ' (' + publicText(prep.interview.error.message) + ')' : '') + '.' }[below.reason] || below.reason)));
+  else if (prep?.interview?.error) panel.append(element('p', 'detail-meta', '준비도 재평가 실패로 지금까지의 답변으로 진행했습니다: ' + publicText(prep.interview.error.message)));
+  const judgeError = prep?.interview?.rounds?.at(-1)?.judgeError;
+  if (waiting && judgeError) panel.append(element('p', 'detail-meta', 'JEV가 이번 질문의 구조를 정리하지 못해 AI가 제안한 질문을 그대로 여쭙니다.'));
   if (prep?.consolidation?.version === 1) {
     panel.append(element('p', 'detail-meta', '질문 정리 · AI 제안 ' + prep.consolidation.inputCount + (prep?.intakeReview?.policy === 'single-fact-essential-only' ? '개 → 단일 질문 ' : '개 → 통합 ') + prep.consolidation.outputCount + '개 · JEV가 선택한 추가 확인 ' + (prep.questions?.length || 0) + '개'));
   }
@@ -959,13 +963,14 @@ function showDetail(record, provider, opener) {
 function connectionState(id) { return id === 'jev' ? connections.jev : connections.providers?.find((entry) => entry.id === id); }
 function connectionUsable(id, state = connectionState(id)) {
   if (!state) return false;
-  return id === 'jev' ? state.connected === true : state.installed !== false && state.authenticated === true;
+  return id === 'jev' ? state.connected === true : state.installed !== false && state.authenticated === true && !state.limited;
 }
 function connectionLabel(id) {
   const state = connectionState(id);
   if (checkingConnections.has(id)) return '확인 중…';
   if (!state) return '확인 전';
   if (connectionUsable(id, state)) return '사용 가능';
+  if (state.limited) return '사용 한도 도달';
   if (id === 'gemini' || id === 'jev') return state.configured === false ? 'API 키 필요' : '연결 실패';
   return !state.installed ? '설치 필요' : '로그인 필요';
 }
@@ -1280,6 +1285,8 @@ async function initialize() {
     if (terminal(record.status)) pendingStart = false;
     renderRecord(record);
     if (terminal(record.status) && !record.saveError) storeRecord(record);
+    // A finished run may have hit a usage limit; refresh the cards so they say so.
+    if (terminal(record.status)) checkAllConnections();
     setControls();
   });
   try {

@@ -168,3 +168,17 @@ test('silent Codex runs are stopped as stalled and retried up to three times', a
   const plain = await runCli('claude', process.execPath, ['-e', 'console.log("ok")'], { timeoutMs: 10000 });
   assert.equal(plain.stdout.trim(), 'ok');
 });
+
+test('only the CLI error itself decides a usage limit, and its original text is kept', () => {
+  const { providerFailure } = require('../services/cli.cjs');
+  const usage = '{"type":"turn.completed","usage":{"input_tokens":14290,"cached_input_tokens":4290}}';
+  const crash = providerFailure('codex', { exitCode: 1, stdout: usage + '\n{"type":"error","message":"stream disconnected before completion"}', stderr: '' });
+  assert.equal(crash.code, 'CLI_FAILED');
+  assert.match(crash.message, /stream disconnected/);
+  const noise = providerFailure('codex', { exitCode: 1, stdout: '{"type":"item.completed","item":{"type":"error","message":"Skill descriptions were shortened to fit the 2% skills context budget."}}', stderr: '' });
+  assert.notEqual(noise.code, 'RATE_LIMIT');
+  const limited = providerFailure('codex', { exitCode: 1, stdout: '{"type":"turn.failed","error":{"message":"You\'ve hit your usage limit. Try again at 5:08 PM."}}', stderr: '' });
+  assert.equal(limited.code, 'RATE_LIMIT');
+  assert.match(limited.message, /CLI 원문: You've hit your usage limit\. Try again at 5:08 PM\./);
+  assert.match(limited.providerDetail, /usage limit/);
+});

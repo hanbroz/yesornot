@@ -184,3 +184,40 @@ test('reassess hides already-asked questions from JEV plans and skips judging on
   const last = await make().reassess({ question: '이직해도 될까요?', preparation: prep, answers: { q1: '많음' }, round: 6, final: true });
   assert.deepEqual([last.score, last.questions.length, seen.length], [50, 0, 1]);
 });
+
+test('when JEV cannot structure the next questions, the AIs\' questions are still asked', async () => {
+  const service = createResearchService({ providers: ['claude', 'codex'], verifySources: async () => [],
+    judgePreparation: async () => { throw Object.assign(new Error('구조 판정 실패'), { code: 'INTAKE_ATOMICITY_FAILED' }); },
+    getStructured: async (id, prompt) => {
+      if (prompt.includes('INTAKE_CONSOLIDATION_DATA_JSON: ')) throw new Error('consolidation down');
+      return { data: { readiness: 57, summary: '부족', questions: [{ question: '런웨이는 몇 개월인가요?', why: '버틸 기간', material: '', required: true }] } };
+    } });
+  const prep = { plans: [{ providerId: 'claude', status: 'success' }, { providerId: 'codex', status: 'success' }], answeredQuestions: [{ id: 'q1', question: '예산은?' }], questions: [] };
+  const result = await service.reassess({ question: '사업을 해도 될까요?', preparation: prep, answers: { q1: '1억' }, round: 2 });
+  assert.equal(result.score, 57);
+  assert.deepEqual(result.questions.map(item => [item.id, item.question, item.choice]), [['r2q1', '런웨이는 몇 개월인가요?', 'AI_PROPOSED']]);
+  assert.equal(result.judgeError.code, 'INTAKE_ATOMICITY_FAILED');
+});
+
+test('moving on below the target records why', async () => {
+  const { service, researched } = setup([60]);
+  const scores = [];
+  const { runId } = service.start({ question: '이직해도 될까요?' }, settings);
+  await service.wait();
+  service.continue({ runId, answers: { q1: '5천만 원' } });
+  await service.wait();
+  // setup() returns a question below 90, so this run is still interviewing.
+  assert.equal(service.active().status, 'awaiting_input');
+  const noQuestions = createDecisionService({
+    providers: [{ id: 'claude', name: 'Claude' }], getApiKey: () => 'k', store: { saveRecord: async () => {} },
+    researchService: { prepare: async () => preparation(), reassess: async input => ({ round: input.round, score: 60, assessments: [], questions: [] }),
+      research: async input => { scores.push(input.preparation.interview.belowTarget); return { status: 'complete', sources: [{ id: 'S1' }], context: 'e [S1]' }; } },
+    getOpinion: async id => ({ providerId: id, status: 'success', text: 'O [S1]' }), evaluate: async () => ({ synthesis: { status: 'complete' } }),
+  });
+  const second = noQuestions.start({ question: '이직해도 될까요?' }, settings);
+  await noQuestions.wait();
+  noQuestions.continue({ runId: second.runId, answers: { q1: '5천만 원' } });
+  await noQuestions.wait();
+  assert.deepEqual(scores, [{ score: 60, reason: 'NO_QUESTIONS' }]);
+  assert.equal(researched.length, 0);
+});
