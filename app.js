@@ -7,6 +7,7 @@ const PROVIDERS = [
   { id: 'codex', name: 'ChatGPT', symbol: 'G', css: 'gpt-avatar', color: 'gpt-color' },
   { id: 'gemini', name: 'Gemini', symbol: '✦', css: 'gemini-avatar', color: 'gemini-color' }
 ];
+const SOURCE_KINDS = { official: '공식 자료', paper: '논문·연구', news: '뉴스', counter: '반대 근거', community: '커뮤니티', github: 'GitHub' };
 const STATUS = { preparing: '사전 검토 중', awaiting_input: '추가 답변 대기', researching: '자료 조사 중', running: '의견 수집 중', evaluating: 'JEV 평가 중', complete: '평가 완료', partial: '평가 완료 · 일부 한계 있음', failed: '실행 실패', canceled: '취소됨' };
 const SAMPLES = {
   launch: '새로운 서비스를 완성 전에 먼저 공개해도 될까요? 핵심 기능은 동작하며, 소규모 사용자에게 베타로 공개하려고 합니다.',
@@ -124,7 +125,7 @@ function updateRunActivity() {
       : phase === 'assessing-readiness' ? '준비도가 90% 미만이면 필요한 정보를 한 번 더 여쭙니다.'
       : 'AI 응답을 기다리고 있습니다. 잠시 시간이 걸릴 수 있습니다.';
   } else if (status === 'researching') {
-    title = { 'refining-queries': '답변을 반영해 검색 범위를 보완하고 있습니다.', researching: 'AI별 조사 에이전트가 공식 자료·논문·뉴스·커뮤니티·반대 근거를 나눠 검색하고 있습니다.', 'verifying-sources': '원문과 출처를 확인하고 있습니다.' }[progress?.phase] || '판단에 필요한 자료를 조사하고 있습니다.';
+    title = { 'refining-queries': '답변을 반영해 검색 범위를 보완하고 있습니다.', researching: 'AI별 조사 에이전트가 공식 자료·논문·뉴스·커뮤니티·반대 근거·GitHub 공개 리소스를 나눠 검색하고 있습니다.', 'verifying-sources': '원문과 출처를 확인하고 있습니다.' }[progress?.phase] || '판단에 필요한 자료를 조사하고 있습니다.';
     detail = (count ? '현재 단계 ' + count + ' 완료 · ' : '') + '확인한 근거를 모아 AI 토론에 전달합니다.';
   } else if (status === 'running') {
     title = 'AI가 수집한 근거를 바탕으로 토론하고 있습니다.';
@@ -747,7 +748,7 @@ function renderResearch(record) {
     const verification = typeof source.verification === 'string' ? source.verification : source.verification?.status;
     const verified = content.warning ? '저장 원문 문자 오류' : { retrieved: '원문 수집', fetched: '원문 수집', verified: '원문 수집', 'search-result': '검색 결과', search_result: '검색 결과', search: '검색 결과', unavailable: '원문 확인 불가', failed: '원문 확인 불가' }[verification] || '확인 상태 미기록';
     const meta = element('div', 'source-detail-meta');
-    meta.append(element('span', 'source-status', verified), element('span', 'source-meta', [source.kind, source.date, publisher].filter(Boolean).join(' · ')));
+    meta.append(element('span', 'source-status', verified), element('span', 'source-meta', [SOURCE_KINDS[source.kind] || source.kind, source.date, publisher].filter(Boolean).join(' · ')));
     const link = element('button', 'source-link', '원문 보기 ↗');
     link.type = 'button';
     link.disabled = !bridge?.openSource || typeof source.url !== 'string' || !/^https?:\/\//i.test(source.url);

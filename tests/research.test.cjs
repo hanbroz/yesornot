@@ -413,3 +413,25 @@ test('every AI runs one independent researcher per evidence focus and failed foc
   assert.ok(result.context.length <= 24000 && result.debateContext.length <= 40000);
   for (const item of result.sources) assert.ok(result.debateContext.includes(`[${item.id}]`));
 });
+
+test('the GitHub researcher alone receives the curated resource list and its review reaches the debate context', async () => {
+  const { GITHUB_RESOURCES } = require('../services/github-resources.cjs');
+  const focusData = {};
+  const service = createResearchService({ providers: ['claude'], judgePreparation: async ({ candidates }) => judged(candidates),
+    verifySources: async sources => sources.map(item => ({ ...item, verification: 'retrieved', excerpt: 'README text' })),
+    getStructured: async (id, prompt, _schema, options) => {
+      if (prompt.includes('INTAKE_CONSOLIDATION_DATA_JSON: ')) return { data: { questions: [{ sourceIds: JSON.parse(prompt.split('INTAKE_CONSOLIDATION_DATA_JSON: ')[1]).candidates.map(row => row.id), question: 'What is your private budget?', why: 'Determine safe financing', material: '' }] } };
+      if (!options.research) return { data: plan() };
+      const data = JSON.parse(prompt.split('RESEARCH_DATA_JSON: ')[1]);
+      focusData[data.agentFocus.id] = data;
+      const found = [source({ url: `https://github.com/example/${data.agentFocus.id}`, kind: data.agentFocus.kind })];
+      const summary = data.agentFocus.id === 'github' ? 'gstack office-hours 질문 방식을 신사업 검토 틀로 적용 가능' : 'findings';
+      return { data: report({ sources: found, summary }), provenance: { searched: true, queries: [data.agentFocus.id], sources: found } };
+    } });
+  const preparation = await service.prepare({ question });
+  const result = await service.research({ question, preparation, answers: { q1: 'Provided' } });
+  assert.deepEqual(focusData.github.knownResources.map(item => item.url), GITHUB_RESOURCES.map(item => item.url));
+  assert.ok(Object.entries(focusData).filter(([id]) => id !== 'github').every(([, data]) => !('knownResources' in data)));
+  assert.ok(result.sources.some(item => item.kind === 'github'));
+  for (const context of [result.context, result.debateContext]) assert.match(context, /GitHub 공개 리소스 검토[^]*gstack office-hours/);
+});

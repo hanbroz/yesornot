@@ -1,6 +1,8 @@
 'use strict';
 
-const KINDS = ['official', 'news', 'paper', 'counter', 'community'];
+const { GITHUB_RESOURCES } = require('./github-resources.cjs');
+
+const KINDS = ['official', 'news', 'paper', 'counter', 'community', 'github'];
 // Independent researchers per AI; each goes deep on one evidence type.
 const RESEARCH_FOCUSES = Object.freeze([
   { id: 'official', kind: 'official', label: '공식 자료·통계·규제', instruction: 'Focus on official primary sources: government and international statistics, regulators, laws, standards, company filings and official announcements.' },
@@ -8,6 +10,7 @@ const RESEARCH_FOCUSES = Object.freeze([
   { id: 'news', kind: 'news', label: '최신 뉴스·업계 동향', instruction: 'Focus on recent independent news coverage and industry press. Record publication dates and distinguish announcements from verified outcomes.' },
   { id: 'community', kind: 'community', label: '커뮤니티·실사용 경험', instruction: 'Focus on practitioner communities, forums, user reviews, Q&A sites and developer discussions. Treat them as anecdotal evidence and note selection bias.' },
   { id: 'counter', kind: 'counter', label: '반대 근거·실패 사례', instruction: 'Focus on contrary evidence, failure cases, criticisms, risks and reasons the proposal could fail or underperform.' },
+  { id: 'github', kind: 'github', label: 'GitHub 공개 리소스', instruction: 'Search GitHub repositories, gists and awesome lists for open-source tools, frameworks, skills, prompts, templates and methodologies that directly help with this decision. Start from knownResources whose topics match the case, then search for others. Read each README or gist. In summary, explain for each useful resource what it is, how its method applies to this decision, and maturity signals (stars, last update, license, maintenance). Mark sources as kind github. Skip resources that are unrelated to the case.', resources: true },
 ]);
 const FOCUS_CONCURRENCY = 3;
 const CHOICES = ['ASK_REQUIRED', 'ASK_OPTIONAL', 'RESEARCH_PUBLIC', 'ALREADY_SUPPLIED', 'NOT_NEEDED', 'SPLIT_REQUIRED'];
@@ -259,6 +262,8 @@ function buildContext(dossier, attachments, { sourceBudget = 10000, limit = 2400
   const unavailable = dossier.sources.filter(source => !['retrieved', 'search-result'].includes(source.verification));
   const safeGaps = dossier.gaps.filter(gap => !gap.startsWith('원문 접근 및 검색 확인 불가:') && !unavailable.some(source => gap.includes(source.url)));
   if (unavailable.length) safeGaps.push(`접근과 실제 검색 출처를 확인하지 못한 ${unavailable.length}개 자료는 사실 근거와 인용 대상에서 제외했습니다. 전체 기록에서는 제외 사유를 확인할 수 있습니다.`);
+  const resourceNotes = (dossier.reports || []).flatMap(report => (report.agents || []).filter(agent => agent.focus === 'github' && agent.status === 'success' && agent.summary).map(agent => agent.summary));
+  if (resourceNotes.length) sections.push('GitHub 공개 리소스 검토(조사 에이전트의 요약이며 사실 근거가 아님. 사실은 [S번호] 출처로 확인하고, 적합한 도구·방법론은 분석 틀로 활용):\n' + clip(resourceNotes.join('\n'), 3000));
   sections.push('조사 한계(사실 주장이나 인용 근거가 아님):\n' + clip(safeGaps.join('\n'), 1200));
   sections.push('사용자의 사전 답변(비공개 맥락):\n' + JSON.stringify(fairTextRows(dossier.answers.map(answer => ({ id: answer.id, question: clip(answer.question, 80), answer: answer.answer })), 'answer', 3800)));
   sections.push('사용자 첨부 자료(비공개 맥락):\n' + JSON.stringify(privateAttachments(attachments, 6000)));
@@ -446,7 +451,7 @@ function createResearchService({ providers, getStructured, judgePreparation, ver
           await inPool(focuses, FOCUS_CONCURRENCY, async focus => {
             const prompt = [SAFETY, 'Perform actual broad external web research NOW before writing your report. Use multiple independent search queries and read accessible sources. Investigate official primary data, current news, relevant scholarly work, and contrary evidence; choose relevance rather than inventing a quota. Verify publication date, geography and applicability. Prefer authoritative original sources; triangulate material claims. Public information gaps are your research work, never homework for the user. Record only searches and URLs actually used. Report inaccessible pages honestly. Do not give the decision verdict yet; provide evidence, limitations and conflicting findings for the later multi-agent debate. You receive only public research queries, purpose, date and JEV coverage focus. No private case, intake answers or attachment content is supplied to this web-enabled stage. Investigate the listed public topics; do not request local files or private context.',
               `RESEARCH AGENT FOCUS (${focus.id}): ${focus.instruction} Other independent agents cover the remaining evidence types in parallel, so go deep on this focus instead of repeating a broad overview. Label each source kind accurately.`,
-              'RESEARCH_DATA_JSON: ' + JSON.stringify({ currentDate: new Date().toISOString().slice(0, 10), searches: plannedSearches, researchPlan: { choice: coverageFocus }, agentFocus: { id: focus.id, kind: focus.kind, label: focus.label } })].join('\n');
+              'RESEARCH_DATA_JSON: ' + JSON.stringify({ currentDate: new Date().toISOString().slice(0, 10), searches: plannedSearches, researchPlan: { choice: coverageFocus }, agentFocus: { id: focus.id, kind: focus.kind, label: focus.label }, ...(focus.resources ? { knownResources: GITHUB_RESOURCES } : {}) })].join('\n');
             try {
               const output = await boundedCall(innerSignal => getStructured(plan.providerId, prompt, REPORT_SCHEMA, { cwd, signal: innerSignal, timeoutMs: duration(timeoutMs), research: true }), signal, duration(timeoutMs));
               agents.push({ focus, status: 'success', ...parseResearchOutput(output) });

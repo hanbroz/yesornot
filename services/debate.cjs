@@ -76,6 +76,7 @@ function promptFor(stage, question, agent, agents, researchContext) {
   const data = { stage, question, agentId: agent.id, role: agent.role, label: agent.label || '최종 의견 종합' };
   if (researchContext) {
     data.researchContext = researchContext;
+    instructions.push('When researchContext reviews public GitHub tools or methodologies, apply the relevant ones as analysis frameworks and say which framework you used; cite their sources with [S#].');
     instructions.push('Use the supplied actual research evidence and private intake answers. Cite material factual claims with [S#] source IDs. Distinguish retrieved text from search snippets and unavailable pages. Check applicability, date, contradictions and alternatives. Do not dismiss accessible public facts as missing user material; separate personal unknowns from public investigation limitations.');
   }
   if (stage === 'draft') {
