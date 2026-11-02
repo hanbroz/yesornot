@@ -154,3 +154,17 @@ test('known API secrets are redacted from provider failure messages', () => {
   try { assert.equal(safeMessage('bad private-test-secret-value'), 'bad [REDACTED]'); }
   finally { if (original === undefined) delete process.env.JEV_API_KEY; else process.env.JEV_API_KEY = original; }
 });
+
+test('silent Codex runs are stopped as stalled and retried up to three times', async () => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const { runProcess, runCli } = require('../services/cli.cjs');
+  const counter = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'yesornot-stall-')), 'n');
+  // Prints one event, then stays silent on the first two runs; the third run finishes.
+  const script = `const fs=require('fs');const n=(+(fs.existsSync(${JSON.stringify(counter)})&&fs.readFileSync(${JSON.stringify(counter)},'utf8'))||0)+1;fs.writeFileSync(${JSON.stringify(counter)},String(n));console.log('started');if(n<3)setTimeout(()=>{},60000);else console.log('done');`;
+  await assert.rejects(runProcess(process.execPath, ['-e', 'console.log(1);setTimeout(()=>{},60000)'], { idleTimeoutMs: 300, timeoutMs: 10000 }), { code: 'STALLED' });
+  const result = await runCli('codex', process.execPath, ['-e', script], { timeoutMs: 10000 }, 300);
+  assert.match(result.stdout, /done/);
+  assert.equal(fs.readFileSync(counter, 'utf8'), '3');
+  const plain = await runCli('claude', process.execPath, ['-e', 'console.log("ok")'], { timeoutMs: 10000 });
+  assert.equal(plain.stdout.trim(), 'ok');
+});

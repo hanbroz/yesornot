@@ -1,7 +1,7 @@
 {
   "name": "yes-or-not",
   "productName": "YES or NO",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Evidence-based AI decision reports with independent JEV review.",
   "author": "hanbroz",
   "repository": {

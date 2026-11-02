@@ -22,18 +22,20 @@ test('missing API key produces configuration status without OAuth or network cal
   assert.doesNotMatch(result.message, /OAuth|로그인/);
 });
 
-test('connection inspection authenticates a metadata GET without generating content', async () => {
+test('connection inspection checks metadata, then makes one tiny real generation request', async () => {
   const calls = [];
   const result = await inspectConnection({ apiKey: KEY, fetchImpl: async (url, options) => {
     calls.push({ url, options });
     return json({ name: `models/${DEFAULT_MODEL}`, supportedGenerationMethods: ['generateContent', 'countTokens'] });
   } });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(calls[0].url, `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_MODEL}`);
-  assert.equal(calls[1].url, 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000');
-  assert.ok(calls.every(call => call.options.method === 'GET' && call.options.body === undefined));
-  assert.deepEqual(result.models, [DEFAULT_MODEL]);
   assert.equal(calls[0].options.method, 'GET');
+  assert.equal(calls[1].url, `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_MODEL}:generateContent`);
+  assert.equal(calls[1].options.method, 'POST');
+  assert.equal(JSON.parse(calls[1].options.body).generationConfig.maxOutputTokens, 16);
+  assert.equal(calls[2].url, 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000');
+  assert.deepEqual(result.models, [DEFAULT_MODEL]);
   assert.equal(calls[0].options.body, undefined);
   assert.equal(calls[0].options.headers['x-goog-api-key'], KEY);
   assert.equal(calls[0].options.redirect, 'error');
@@ -50,7 +52,7 @@ test('opaque auth keys with a period and other header-safe characters reach Goog
     assert.equal(options.headers['x-goog-api-key'], key);
     return json({ name: `models/${DEFAULT_MODEL}`, supportedGenerationMethods: ['generateContent'] });
   } });
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.equal(result.authenticated, true);
   assert.equal(result.reason, 'READY');
   const generated = await getOpinion('작게 시험해 볼까요?', { apiKey: key, fetchImpl: async (_url, options) => {
@@ -197,6 +199,15 @@ test('unexpected function calls are rejected and never executed', async () => {
 
 test('malformed content parts produce a controlled validation error', async () => {
   await assert.rejects(getOpinion('질문', { apiKey: KEY, fetchImpl: async () => json(payload({ candidates: [{ content: { parts: [null] } }] })) }), { code: 'INVALID_RESPONSE' });
+});
+
+test('retired models and depleted credits fail the connection check with a clear reason', async () => {
+  const meta = json({ name: `models/${DEFAULT_MODEL}`, supportedGenerationMethods: ['generateContent'] });
+  for (const [status, reason] of [[404, 'MODEL_UNAVAILABLE'], [402, 'BILLING_REQUIRED']]) {
+    const result = await inspectConnection({ apiKey: KEY, fetchImpl: async (url) => url.endsWith(':generateContent') ? new Response('{}', { status }) : meta.clone() });
+    assert.equal(result.reason, reason);
+    assert.notEqual(result.authenticated, true);
+  }
 });
 
 test('metadata must advertise generateContent support', async () => {

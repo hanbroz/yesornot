@@ -25,6 +25,20 @@ function failure(code, message) { return Object.assign(new Error(message), { cod
 function abortError(signal) { return signal?.reason?.code === 'TIMEOUT' ? signal.reason : failure('ABORTED', '자료 조사가 취소되었습니다.'); }
 function clip(value, limit) { const text = typeof value === 'string' ? value : ''; return text.length <= limit ? text : text.slice(0, Math.max(0, limit - TRUNCATED.length)) + TRUNCATED; }
 function safeCode(error) { return /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code || '') ? error.code : 'RESEARCH_PROVIDER_ERROR'; }
+// Fixed wording per code: provider messages may echo prompts, so never store them in history.
+const PLAN_FAILURES = {
+  TIMEOUT: '응답 대기 시간을 넘었습니다. 연결 설정에서 단계별 응답 대기 시간을 늘려 보세요.',
+  MODEL_UNAVAILABLE: '선택한 모델을 사용할 수 없습니다. 연결 설정에서 다른 모델을 선택해 주세요.',
+  BILLING_REQUIRED: 'API 결제 크레딧이 소진되었습니다.',
+  AUTH_REQUIRED: '로그인 또는 API 키 확인이 필요합니다.',
+  NOT_CONFIGURED: 'API 키가 설정되지 않았습니다.',
+  RATE_LIMIT: '사용 한도에 도달했습니다.',
+  NOT_INSTALLED: 'CLI가 설치되어 있지 않습니다.',
+  INVALID_RESPONSE: 'AI 응답 형식이 올바르지 않았습니다.',
+  NETWORK_ERROR: '인터넷 연결 또는 API 응답에 문제가 있었습니다.',
+  STALLED: 'AI가 응답 도중 멈춰 다시 시도했지만 이어지지 않았습니다. 사용 한도나 서비스 상태를 확인해 주세요.',
+};
+function planFailureReason(code) { return PLAN_FAILURES[code] ? ' 원인: ' + PLAN_FAILURES[code] : ''; }
 function validString(value, limit, empty = false) { return typeof value === 'string' && (empty || value.trim().length > 0) && value.length <= limit; }
 function invalid() { throw failure('INVALID_RESPONSE', '자료 조사 응답의 형식을 확인할 수 없습니다.'); }
 function boundedCall(start, signal, timeoutMs) {
@@ -293,7 +307,7 @@ function createResearchService({ providers, getStructured, judgePreparation, ver
           plans.push({ providerId, status: 'success', ...validatePlan(output?.data), model: clip(output?.model, 200) });
         } catch (error) {
           if (signal?.aborted || error?.code === 'ABORTED') throw abortError(signal);
-          plans.push({ providerId, status: 'error', errorCode: safeCode(error), error: '해당 AI의 조사 계획을 사용할 수 없어 제외했습니다.' });
+          plans.push({ providerId, status: 'error', errorCode: safeCode(error), error: '해당 AI의 조사 계획을 사용할 수 없어 제외했습니다.' + planFailureReason(safeCode(error)) });
         }
         progress(onProgress, { phase: 'planning', completed: plans.length, total: ids.length });
       }));

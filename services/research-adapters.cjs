@@ -79,7 +79,7 @@ async function getCliStructured(id, prompt, schema, { cwd, signal, timeoutMs = 1
     const env = cli.cleanEnvironment();
     if (!await cli.subscriptionAuthenticated(id, binary, { cwd: directory, env, signal, timeoutMs: Math.min(15000, timeoutMs) })) throw error('AUTH_REQUIRED', '구독 계정 로그인이 필요합니다.');
     if (id === 'codex') await fs.writeFile(path.join(directory, 'response-schema.json'), JSON.stringify(schema));
-    const result = await cli.runProcess(binary.command, [...binary.args, ...buildStructuredArgs(id, directory, schema, research)], { cwd: directory, env, input: prompt, signal, timeoutMs, maxOutputBytes: 6 * 1024 * 1024 });
+    const result = await cli.runCli(id, binary.command, [...binary.args, ...buildStructuredArgs(id, directory, schema, research)], { cwd: directory, env, input: prompt, signal, timeoutMs, maxOutputBytes: 6 * 1024 * 1024 }, research ? 180000 : 90000);
     if (result.exitCode !== 0) throw cli.providerFailure(id, result);
     return parseStructured(id, result.stdout, research);
   } finally { await fs.rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {}); }

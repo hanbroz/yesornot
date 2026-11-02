@@ -101,10 +101,11 @@ async function requestJson(suffix, { key, signal, timeoutMs = DEFAULT_TIMEOUT_MS
       });
     } catch { throw failure('NETWORK_ERROR', 'Gemini API에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.'); }
     if (!response || !Number.isInteger(response.status)) throw failure('INVALID_RESPONSE', 'Gemini API 응답을 확인하지 못했습니다.');
-    if ([401, 403, 404, 429].includes(response.status)) {
+    if ([401, 402, 403, 404, 429].includes(response.status)) {
       response.body?.cancel?.().catch(() => {});
       if (response.status === 401 || response.status === 403) throw failure('AUTH_REQUIRED', 'Gemini API 키 또는 API 접근 권한을 확인해 주세요.');
-      if (response.status === 404) throw failure('MODEL_UNAVAILABLE', '설정한 Gemini 모델을 사용할 수 없습니다. GEMINI_MODEL을 확인해 주세요.');
+      if (response.status === 402) throw failure('BILLING_REQUIRED', 'Gemini API 선불 크레딧이 소진되었습니다. Google AI Studio에서 결제와 크레딧을 확인해 주세요.');
+      if (response.status === 404) throw failure('MODEL_UNAVAILABLE', '선택한 Gemini 모델은 이 API 키로 사용할 수 없습니다. 신규 사용자에게 종료된 모델일 수 있으니 다른 모델을 선택해 주세요.');
       throw failure('RATE_LIMIT', 'Gemini API 사용 한도에 도달했습니다. Google AI Studio에서 한도와 프로젝트 설정을 확인해 주세요.');
     }
     const data = await readJsonBounded(response, limit, controller.signal);
@@ -137,6 +138,9 @@ async function inspectConnection(options = {}) {
       throw failure('INVALID_RESPONSE', 'Gemini 모델 정보를 확인하지 못했습니다.');
     }
     if (!data.supportedGenerationMethods.includes('generateContent')) throw failure('MODEL_UNAVAILABLE', '설정한 Gemini 모델은 텍스트 의견 생성을 지원하지 않습니다.');
+    // Metadata can exist for retired models or unpaid projects, so make one tiny real request.
+    await requestJson(`${model}:generateContent`, { ...options, key, method: 'POST', timeoutMs: options.timeoutMs ?? 15000,
+      body: { contents: [{ role: 'user', parts: [{ text: 'ok' }] }], generationConfig: { maxOutputTokens: 16, candidateCount: 1 } } });
     let models = [model];
     try {
       const list = await requestJson('?pageSize=1000', { ...options, key, timeoutMs: options.timeoutMs ?? 15000 });
@@ -145,7 +149,7 @@ async function inspectConnection(options = {}) {
         .map(entry => String(entry.name).replace(/^models\//, '')).filter(name => /^gemini-[a-z0-9][a-z0-9._-]{0,119}$/.test(name));
       models = [...new Set([model, ...names])];
     } catch { /* The selected model was already verified; the list is optional. */ }
-    return { ...base, authenticated: true, version: model, models, message: 'Gemini API 키와 모델 접근을 확인했습니다. 요금제와 무료 한도는 Google AI Studio에서 확인해 주세요.', reason: 'READY', action: 'none' };
+    return { ...base, authenticated: true, version: model, models, message: 'Gemini API 키와 모델로 실제 응답을 받아 확인했습니다. 요금제와 한도는 Google AI Studio에서 확인해 주세요.', reason: 'READY', action: 'none' };
   } catch (error) {
     return { ...base,
       authenticated: ['NOT_CONFIGURED', 'INVALID_API_KEY', 'AUTH_REQUIRED'].includes(error.code) ? false : null,

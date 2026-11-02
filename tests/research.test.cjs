@@ -55,7 +55,7 @@ test('failed planners are excluded and unavailable providers are never invoked',
   const calls = [];
   const service = fixture({ providers: [{ id: 'claude', available: false }, { id: 'codex', authenticated: true }, 'gemini'], getStructured: async id => { calls.push(id); if (id === 'gemini') throw Object.assign(new Error('secret error detail'), { code: 'AUTH_REQUIRED' }); return { data: plan() }; } });
   const result = await service.prepare({ question });
-  assert.deepEqual(calls.sort(), ['codex', 'gemini']); assert.equal(result.plans[1].errorCode, 'AUTH_REQUIRED'); assert.ok(!JSON.stringify(result).includes('secret error detail'));
+  assert.deepEqual(calls.sort(), ['codex', 'gemini']); assert.equal(result.plans[1].errorCode, 'AUTH_REQUIRED'); assert.match(result.plans[1].error, /원인: 로그인 또는 API 키/); assert.ok(!JSON.stringify(result).includes('secret error detail'));
   assert.deepEqual(result.questions[0].providerIds, ['codex']);
 });
 

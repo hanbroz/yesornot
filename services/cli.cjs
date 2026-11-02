@@ -50,7 +50,7 @@ function killTree(child) {
   }
 }
 
-function runProcess(command, args = [], { cwd, env = cleanEnvironment(), input = '', signal, timeoutMs = 180000, maxOutputBytes = 2 * 1024 * 1024 } = {}) {
+function runProcess(command, args = [], { cwd, env = cleanEnvironment(), input = '', signal, timeoutMs = 180000, idleTimeoutMs, maxOutputBytes = 2 * 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(processError('요청이 취소되었습니다.', 'ABORTED'));
     let child;
@@ -59,8 +59,8 @@ function runProcess(command, args = [], { cwd, env = cleanEnvironment(), input =
     const stderr = [];
     let failure;
     let settled = false;
-    let terminationTimer;
-    const cleanup = () => { clearTimeout(timer); clearTimeout(terminationTimer); signal?.removeEventListener('abort', onAbort); };
+    let terminationTimer, idleTimer;
+    const cleanup = () => { clearTimeout(timer); clearTimeout(terminationTimer); clearTimeout(idleTimer); signal?.removeEventListener('abort', onAbort); };
     const finish = (error, result) => {
       if (settled) return;
       settled = true;
@@ -75,6 +75,9 @@ function runProcess(command, args = [], { cwd, env = cleanEnvironment(), input =
     };
     const onAbort = () => stop(processError('요청이 취소되었습니다.', 'ABORTED'));
     const timer = setTimeout(() => stop(processError('CLI 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.', 'TIMEOUT')), timeoutMs);
+    // A CLI that prints nothing for idleTimeoutMs is treated as stalled, not slow.
+    const resetIdle = () => { if (!idleTimeoutMs || settled || failure) return; clearTimeout(idleTimer); idleTimer = setTimeout(() => stop(processError('AI 응답이 멈췄습니다.', 'STALLED')), idleTimeoutMs); };
+    resetIdle();
     try {
       child = spawn(command, args, { cwd, env, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (error) { finish(error); return; }
@@ -85,7 +88,7 @@ function runProcess(command, args = [], { cwd, env = cleanEnvironment(), input =
       if (outputBytes > maxOutputBytes) { stop(processError('CLI 출력이 허용 크기를 초과했습니다.', 'OUTPUT_LIMIT')); return; }
       target.push(chunk);
     };
-    child.stdout.on('data', chunk => collect(stdout, chunk));
+    child.stdout.on('data', chunk => { resetIdle(); collect(stdout, chunk); });
     child.stderr.on('data', chunk => collect(stderr, chunk));
     child.on('error', error => finish(failure || error));
     child.on('close', (exitCode, terminationSignal) => finish(failure, { stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), exitCode, signal: terminationSignal }));
@@ -129,6 +132,17 @@ function resolveCli(id, { cwd = path.resolve(__dirname, '..'), env = process.env
     if (isFile(entry)) return { command: node, args: [entry] };
   }
   return null;
+}
+
+// Codex exec sometimes stops emitting events after the turn starts and never
+// recovers; successful turns stream within ~20s, so restart a silent run.
+// ponytail: fixed 3 attempts; make adaptive if stalls persist across retries.
+async function runCli(id, command, args, options, idleTimeoutMs = 90000) {
+  if (id !== 'codex') return runProcess(command, args, options);
+  for (let attempt = 1; ; attempt++) {
+    try { return await runProcess(command, args, { ...options, idleTimeoutMs }); }
+    catch (error) { if (error.code !== 'STALLED' || attempt >= 3 || options.signal?.aborted) throw error; }
+  }
 }
 
 function parseJson(text) {
@@ -274,11 +288,11 @@ async function getOpinion(id, question, { cwd = path.resolve(__dirname, '..'), s
       throw processError(`${provider.name} 구독 계정 로그인이 필요합니다. API 키 로그인은 이 앱에서 사용하지 않습니다.`, 'AUTH_REQUIRED');
     }
     onProgress?.({ providerId: id, status: 'running' });
-    const result = await runProcess(binary.command, [...binary.args, ...buildArgs(id, directory)], { cwd: directory, env, input: prompt ?? buildPrompt(question.trim(), researchContext), signal, timeoutMs });
+    const result = await runCli(id, binary.command, [...binary.args, ...buildArgs(id, directory)], { cwd: directory, env, input: prompt ?? buildPrompt(question.trim(), researchContext), signal, timeoutMs });
     if (result.exitCode !== 0) throw providerFailure(id, result);
     const opinion = parseOpinion(id, result.stdout);
     return { providerId: id, name: provider.name, status: 'success', ...opinion, elapsedMs: Date.now() - started };
   });
 }
 
-module.exports = { PROVIDERS, inspectAll, getOpinion, runProcess, parseOpinion, cleanEnvironment, resolveCli, buildArgs, buildPrompt, safeMessage, prepareGemini, subscriptionAuthenticated, providerFailure };
+module.exports = { PROVIDERS, inspectAll, getOpinion, runProcess, runCli, parseOpinion, cleanEnvironment, resolveCli, buildArgs, buildPrompt, safeMessage, prepareGemini, subscriptionAuthenticated, providerFailure };
