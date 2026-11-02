@@ -445,3 +445,14 @@ dialog::backdrop{background:rgba(20,23,31,.4);backdrop-filter:blur(2px)}
   .opinion-card,.verdict-panel{break-inside:avoid;box-shadow:none}
   .opinion-preview{display:block;overflow:visible;-webkit-line-clamp:unset;min-height:0}
 }
+
+.readiness-meter{margin:12px 0;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:#fff;word-break:keep-all}
+.readiness-meter progress{width:100%;height:8px;margin:8px 0 2px;accent-color:var(--warn)}
+.readiness-meter.is-ready progress{accent-color:var(--ok)}
+.readiness-meter .detail-meta{margin:4px 0 0}
+.research-agent-list{margin:6px 0 10px;padding-left:18px;font-size:13px;line-height:1.7;color:var(--text-2);word-break:keep-all}
+.research-agent-list li.is-failed{color:var(--warn)}
+.final-review{margin-top:18px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:#fff;word-break:keep-all}
+.final-review h6{margin:0;font-size:14px}
+.final-review.is-passed h6{color:var(--ok)}
+.final-review.is-warn h6{color:var(--warn)}

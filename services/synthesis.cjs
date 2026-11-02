@@ -3,7 +3,16 @@
 const { FINAL_REPORT_INSTRUCTIONS, validateDecisionReport } = require('./decision-report.cjs');
 
 const PROVIDER_ORDER = ['claude', 'codex', 'gemini'];
+const PROVIDER_NAMES = { claude: 'Claude', codex: 'ChatGPT', gemini: 'Gemini' };
 const CHOICES = ['YES', 'NO', 'CONDITIONAL'];
+// Independent reviewers must agree the combined report is fit to be the final answer.
+const REVIEW_TARGET = 90;
+const MAX_REPORT_REPAIRS = 2;
+const FINAL_REVIEW_SCHEMA = { type: 'object', additionalProperties: false, required: ['score', 'suitable', 'issues', 'strengths'], properties: {
+  score: { type: 'integer', minimum: 0, maximum: 100 }, suitable: { type: 'boolean' },
+  issues: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 600 } },
+  strengths: { type: 'array', maxItems: 5, items: { type: 'string', maxLength: 400 } },
+} };
 const SAFE_ERROR_CODES = new Set(['AUTH_REQUIRED', 'NOT_INSTALLED', 'CLI_NOT_FOUND', 'RATE_LIMIT', 'TIMEOUT', 'INVALID_RESPONSE', 'INVALID_API_KEY', 'NETWORK_ERROR', 'UNAVAILABLE', 'AUTH_ERROR', 'INVALID_CITATIONS', 'INCOMPLETE_REPORT']);
 
 function failure(code, message) { return Object.assign(new Error(message), { code }); }
@@ -121,6 +130,26 @@ function finalPrompt(question, sources, reviews, initial, refined, researchConte
   });
 }
 
+function finalReviewPrompt(question, sources, refined, report, researchContext) {
+  return budgetPrompt([
+    '당신은 최종 보고서를 작성하지 않은 독립 검토자입니다. 아래 최종 보고서가 이 질문의 최종 결론 보고서로 적합한지 검토하세요.',
+    SAFETY,
+    '다음 기준으로 0~100점을 매기세요. (1) 질문에 직접 답하는가. (2) 한 AI의 답변을 그대로 따르지 않고 모든 AI 의견과 토론의 타당한 근거·반론을 균형 있게 종합했는가. (3) 핵심 사실을 researchContext의 [S번호]로 정확히 인용했고 출처에 없는 사실을 만들지 않았는가. (4) 사용자의 사전 답변과 조건을 반영했는가. (5) 실행 조건과 다음 행동이 구체적인가. (6) 불확실성·소수 의견·결론이 바뀌는 조건을 숨기지 않았는가. (7) 결론이 JEV 재평가 판정과 일치하는가.',
+    `점수가 ${REVIEW_TARGET}점 이상이고 치명적인 문제가 없을 때만 suitable을 true로 하세요. issues에는 작성자가 바로 고칠 수 있는 구체적인 문제만 한국어로 적고, strengths에는 유지할 장점을 적으세요. JSON 객체 하나만 출력하세요.`,
+  ], {
+    phase: 'final-report-review', question, researchContext,
+    originalOpinions: sources.map(plainOpinion), reviewedVerdict: refined.verdict,
+    finalReport: { stance: report.stance, title: report.title, text: report.text, point: report.point },
+  });
+}
+
+function validateFinalReview(value) {
+  const data = value?.data;
+  if (!data || !Number.isInteger(data.score) || data.score < 0 || data.score > 100 || typeof data.suitable !== 'boolean' ||
+    !Array.isArray(data.issues) || !Array.isArray(data.strengths) || [...data.issues, ...data.strengths].some(item => typeof item !== 'string')) throw failure('INVALID_RESPONSE', '최종 보고서 검토 응답의 형식이 올바르지 않습니다.');
+  return { score: data.score, suitable: data.suitable, issues: data.issues.map(item => clipContext(item.trim(), 600)).filter(Boolean).slice(0, 8), strengths: data.strengths.map(item => clipContext(item.trim(), 400)).filter(Boolean).slice(0, 5) };
+}
+
 function validateOpinion(opinion, { stance, rejectCopies = [] } = {}) {
   if (!opinion || opinion.status !== 'success' || !CHOICES.includes(opinion.stance) || (stance && opinion.stance !== stance) ||
       [['title', 500], ['text', 30000], ['point', 5000]].some(([key, limit]) =>
@@ -151,7 +180,7 @@ function combinedUsage(initial, refined) {
   };
 }
 
-function createSynthesizedEvaluation({ evaluate, getOpinion }) {
+function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
   if (typeof evaluate !== 'function' || typeof getOpinion !== 'function') throw new TypeError('evaluate and getOpinion are required');
   return async function evaluateAndSynthesize(options) {
     const { question, signal, cwd, timeoutMs = 180000, onProgress } = options;
@@ -169,6 +198,15 @@ function createSynthesizedEvaluation({ evaluate, getOpinion }) {
       signal?.addEventListener('abort', abort, { once: true });
       const timer = setTimeout(() => controller.abort(failure('TIMEOUT', '검증·작성 제한 시간을 초과했습니다.')), timeoutMs);
       try { return await withAbort(() => getOpinion(providerId, question, { cwd, signal: controller.signal, timeoutMs, prompt }), controller.signal); }
+      finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+    };
+    const structured = async (providerId, prompt) => {
+      const controller = new AbortController();
+      const abort = () => controller.abort(canceled());
+      if (signal?.aborted) throw canceled();
+      signal?.addEventListener('abort', abort, { once: true });
+      const timer = setTimeout(() => controller.abort(failure('TIMEOUT', '최종 보고서 검토 시간을 초과했습니다.')), timeoutMs);
+      try { return await withAbort(() => getStructured(providerId, prompt, FINAL_REVIEW_SCHEMA, { cwd, signal: controller.signal, timeoutMs, research: false }), controller.signal); }
       finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
     };
     const evaluatePhase = async (phase, opinions, reviewContext) => {
@@ -224,6 +262,42 @@ function createSynthesizedEvaluation({ evaluate, getOpinion }) {
       try {
         emit({ stage: 'synthesizing', providerId, sourceProviderIds, attempt: attempts.length + 1 });
         let result, report;
+        // Reviewers score the combined report; below the target the writer revises it with their issues.
+        const reviewFinalReport = async (draft, writerId, candidates) => {
+          const reviewers = candidates.filter(id => id !== writerId).length ? candidates.filter(id => id !== writerId) : [writerId];
+          const finalReview = { version: 1, target: REVIEW_TARGET, reviewers, rounds: [] };
+          for (let pass = 0; ; pass++) {
+            emit({ stage: 'final-review', providerId: writerId, round: pass + 1 });
+            const rows = await Promise.all(reviewers.map(async reviewerId => {
+              try { return { providerId: reviewerId, status: 'complete', ...validateFinalReview(await structured(reviewerId, finalReviewPrompt(question, sources, refined, draft, options.researchContext))) }; }
+              catch (error) { if (isCanceled(error, signal)) throw canceled(); return { providerId: reviewerId, status: 'error', errorCode: safeCode(error) }; }
+            }));
+            const done = rows.filter(row => row.status === 'complete');
+            const score = done.length ? Math.round(done.reduce((sum, row) => sum + row.score, 0) / done.length) : null;
+            const passed = score !== null && score >= REVIEW_TARGET && done.every(row => row.suitable);
+            finalReview.rounds.push({ round: pass + 1, score, passed, reviews: rows });
+            finalReview.score = score;
+            if (score === null) { finalReview.status = 'error'; break; }
+            if (passed) { finalReview.status = 'passed'; break; }
+            if (pass >= MAX_REPORT_REPAIRS) { finalReview.status = 'not-passed'; break; }
+            emit({ stage: 'synthesizing', providerId: writerId, sourceProviderIds, attempt: attempts.length + 1, repairing: true });
+            try {
+              const issues = done.flatMap(row => row.issues.map(issue => `${PROVIDER_NAMES[row.providerId] || row.providerId} 검토: ${issue}`)).slice(0, 12);
+              const response = await inference(writerId, finalPrompt(question, sources, reviews, initial, refined, options.researchContext, options.researchSources,
+                { issues: issues.length ? issues : ['독립 검토 점수가 기준에 미달했습니다. 종합성·인용·실행 조건을 보완하세요.'], previousDraft: { stance: draft.stance, text: clipContext(draft.text, 6000), point: clipContext(draft.point, 1500) } }));
+              if (signal?.aborted) throw canceled();
+              const revised = validateOpinion(response, { stance: refined.verdict.choice, rejectCopies: sources.concat(verified) });
+              validateCitations(revised, options.researchSources);
+              revised.report = validateDecisionReport(revised);
+              draft = revised;
+            } catch (error) {
+              if (isCanceled(error, signal)) throw canceled();
+              finalReview.status = 'not-passed'; finalReview.repairErrorCode = safeCode(error);
+              break;
+            }
+          }
+          return { ...draft, finalReview };
+        };
         // One content repair per writer. Transport, stance, copy and citation
         // failures retain the existing provider fallback path.
         for (let pass = 0; pass < 2; pass++) {
@@ -242,6 +316,7 @@ function createSynthesizedEvaluation({ evaluate, getOpinion }) {
           }
         }
         result.report = report;
+        if (typeof getStructured === 'function') result = await reviewFinalReport(result, providerId, verifiedIds);
         attempts.push({ providerId, status: 'complete', ...(repair ? { repairCount: 1 } : {}) });
         const synthesis = { version: 2, status: 'complete', ...result, providerId, sourceProviderIds, elapsedMs: Date.now() - started, attempts };
         emit({ stage: 'complete', synthesisStatus: 'complete' });
@@ -257,4 +332,4 @@ function createSynthesizedEvaluation({ evaluate, getOpinion }) {
   };
 }
 
-module.exports = { createSynthesizedEvaluation };
+module.exports = { createSynthesizedEvaluation, REVIEW_TARGET, MAX_REPORT_REPAIRS };

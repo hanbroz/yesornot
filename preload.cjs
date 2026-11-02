@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('decisionApp', {
   saveSettings: payload => invoke('decision:settings', payload),
   login: id => invoke('decision:login', id),
   copyResult: id => invoke('decision:copy', id),
+  exportReportPdf: id => invoke('decision:report-pdf', id),
   onRunEvent: callback => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('decision:event', listener);

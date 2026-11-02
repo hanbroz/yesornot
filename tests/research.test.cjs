@@ -2,7 +2,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createResearchService } = require('../services/research.cjs');
+const { createResearchService, RESEARCH_FOCUSES } = require('../services/research.cjs');
+// Single-researcher invariants run with one focus; multi-focus behaviour has its own tests.
+const ONE_FOCUS = [RESEARCH_FOCUSES[0]];
 
 const question = 'Should we relocate for a better home?';
 const plan = (overrides = {}) => ({ summary: 'Find public market evidence before advising.', searches: [{ query: 'regional housing statistics 2026', purpose: 'Check recent primary data', kind: 'official' }], questions: [{ question: 'What is your private budget?', why: 'Determine safe financing', material: 'Personal budget sheet', required: true }], ...overrides });
@@ -11,7 +13,7 @@ const report = (overrides = {}) => ({ summary: 'Public data is mixed; compare ac
 const judged = candidates => ({ model: 'jev-fixture', items: candidates.map(candidate => ({ id: candidate.id, choice: 'ASK_REQUIRED', confidence: 0.9, probabilities: { ASK_REQUIRED: 0.9, ASK_OPTIONAL: 0.1 } })) });
 function fixture(overrides = {}) {
   const adapter = overrides.getStructured || (async (_id, _prompt, _schema, options) => options.research ? { data: report(), model: 'research-fixture', provenance: { searched: true, queries: ['real tool query'], sources: [] } } : { data: plan(), model: 'planner-fixture' });
-  return createResearchService({ providers: ['claude', 'codex'], judgePreparation: async ({ candidates }) => judged(candidates),
+  return createResearchService({ providers: ['claude', 'codex'], focuses: ONE_FOCUS, judgePreparation: async ({ candidates }) => judged(candidates),
     verifySources: async sources => sources.map(item => ({ ...item, verification: 'retrieved', excerpt: 'Actually retrieved source text.' })), ...overrides,
     getStructured: async (id, prompt, schema, options) => {
       if (prompt.includes('INTAKE_CONSOLIDATION_DATA_JSON: ')) {
@@ -95,7 +97,7 @@ test('source aggregation deduplicates tracking URLs and retains real queries, pr
     assert.ok(!prompt.includes(question)); assert.ok(!prompt.includes('private answer')); assert.ok(!prompt.includes('private attachment')); assert.ok(!prompt.includes('What is your private budget?'));
     assert.match(prompt, /No private case, intake answers or attachment content is supplied/);
     const publicData = JSON.parse(prompt.split('RESEARCH_DATA_JSON: ')[1]);
-    assert.deepEqual(Object.keys(publicData).sort(), ['currentDate', 'researchPlan', 'searches']);
+    assert.deepEqual(Object.keys(publicData).sort(), ['agentFocus', 'currentDate', 'researchPlan', 'searches']);
   }
 });
 
@@ -343,8 +345,8 @@ test('global source cap is shared round robin across independent researchers', a
     return { data: report({ sources }), provenance: { searched: true, queries: ['actual query'], sources } };
   } });
   const preparation = await service.prepare({ question }); const result = await service.research({ question, preparation, answers: { q1: 'Provided' } });
-  assert.equal(result.sources.length, 30);
-  for (const providerId of ['claude', 'codex', 'gemini']) assert.equal(result.sources.filter(item => item.providerIds.includes(providerId)).length, 10);
+  assert.equal(result.sources.length, 40);
+  for (const providerId of ['claude', 'codex', 'gemini']) assert.ok([13, 14].includes(result.sources.filter(item => item.providerIds.includes(providerId)).length));
 });
 
 test('subdomains of one publisher do not satisfy independent domain breadth', async () => {
@@ -382,4 +384,32 @@ test('unavailable source claims and unverified model summaries never enter reaso
   for (const retained of ['[S1]', 'ACTUALLY_RETRIEVED_USABLE_MARKER', 'PRIVATE_ANSWER_STILL_PRESENT', 'PRIVATE_DOCUMENT_STILL_PRESENT']) assert.ok(result.context.includes(retained), retained);
   assert.match(result.context, /실제로 표시된 \[S번호\]만 인용/);
   assert.equal(result.status, 'partial');
+});
+
+test('every AI runs one independent researcher per evidence focus and failed focuses stay visible', async () => {
+  const calls = [];
+  const service = createResearchService({ providers: ['claude', 'codex'], judgePreparation: async ({ candidates }) => judged(candidates),
+    verifySources: async sources => sources.map(item => ({ ...item, verification: 'retrieved', excerpt: 'Actually retrieved source text.' })),
+    getStructured: async (id, prompt, _schema, options) => {
+      if (prompt.includes('INTAKE_CONSOLIDATION_DATA_JSON: ')) return { data: { questions: [{ sourceIds: JSON.parse(prompt.split('INTAKE_CONSOLIDATION_DATA_JSON: ')[1]).candidates.map(row => row.id), question: 'What is your private budget?', why: 'Determine safe financing', material: '' }] } };
+      if (!options.research) return { data: plan() };
+      const focus = JSON.parse(prompt.split('RESEARCH_DATA_JSON: ')[1]).agentFocus;
+      calls.push(id + ':' + focus.id);
+      if (id === 'codex' && focus.id === 'community') throw Object.assign(new Error('stalled'), { code: 'STALLED' });
+      const found = [source({ url: `https://${id}-${focus.id}.example.org/a`, kind: focus.kind })];
+      return { data: report({ sources: found, summary: focus.label + ' findings' }), provenance: { searched: true, queries: [id + ' ' + focus.id + ' query'], sources: found } };
+    } });
+  const preparation = await service.prepare({ question });
+  const result = await service.research({ question, preparation, answers: { q1: 'Provided' } });
+  assert.equal(calls.length, RESEARCH_FOCUSES.length * 2);
+  for (const id of ['claude', 'codex']) for (const focus of RESEARCH_FOCUSES) assert.ok(calls.includes(id + ':' + focus.id));
+  const codex = result.reports.find(row => row.providerId === 'codex');
+  assert.equal(codex.agents.length, RESEARCH_FOCUSES.length);
+  assert.equal(codex.agents.find(agent => agent.focus === 'community').status, 'error');
+  assert.ok(codex.gaps.some(gap => gap.includes('커뮤니티') && gap.includes('STALLED')));
+  assert.ok(result.sources.some(item => item.kind === 'community'));
+  assert.equal(result.sources.length, RESEARCH_FOCUSES.length * 2 - 1);
+  // Debate agents see every collected source; the JEV copy stays within its 24,000-character limit.
+  assert.ok(result.context.length <= 24000 && result.debateContext.length <= 40000);
+  for (const item of result.sources) assert.ok(result.debateContext.includes(`[${item.id}]`));
 });

@@ -13,13 +13,16 @@ const getDebatedOpinion = createDebateOpinion({ getOpinion:cli.getOpinion });
 const jev = require('./services/jev.cjs');
 const gemini = require('./services/gemini.cjs');
 const { createSynthesizedEvaluation } = require('./services/synthesis.cjs');
-const evaluateAndSynthesize = createSynthesizedEvaluation({ evaluate:jev.evaluate, getOpinion:(id, question, options) => id === 'gemini' ? gemini.getOpinion(question, { ...options, apiKey:geminiKey, model:geminiModel }) : cli.getOpinion(id, question, options) });
+const evaluateAndSynthesize = createSynthesizedEvaluation({ evaluate:jev.evaluate, getOpinion:(id, question, options) => id === 'gemini' ? gemini.getOpinion(question, { ...options, apiKey:geminiKey, model:geminiModel }) : cli.getOpinion(id, question, options),
+  getStructured:(id, prompt, schema, options) => id === 'gemini' ? researchAdapters.getGeminiStructured(prompt, schema, { ...options, apiKey:geminiKey, model:geminiModel }) : researchAdapters.getCliStructured(id, prompt, schema, options) });
 const { loadSecret, saveSecret } = require('./services/credentials.cjs');
 const { createUpdateService } = require('./services/updates.cjs');
 const { existsSync } = require('node:fs');
 const { createAttachmentService } = require('./services/attachments.cjs');
 const { createQuestionnaireFiles } = require('./services/questionnaire-files.cjs');
 const { readBuildInfo } = require('./services/build-version.cjs');
+const { buildReportHtml, reportFileName } = require('./services/report-pdf.cjs');
+const { randomUUID } = require('node:crypto');
 const buildInfo = readBuildInfo(__dirname);
 const appTitle = 'YES or NO — JEV Decision Room · ' + (buildInfo ? 'ver. ' + buildInfo.buildVersion : '개발 모드');
 const { createResearchService } = require('./services/research.cjs');
@@ -152,11 +155,40 @@ async function login(id) {
   if (service.active()) throw new Error('진행 중인 판단이 끝난 후 로그인하세요.');
   return openLoginTerminal(id, { cwd:path.join(userData,'cli-workspace'), scriptPath:path.join(__dirname,'scripts','login.ps1') });
 }
+let pdfSession, pdfReportUrl;
+async function exportReportPdf(id) {
+  const record = store.snapshot().history.find(r => r.id === id) || (lastCompletedRecord?.id === id ? lastCompletedRecord : null);
+  if (!record) throw new Error('PDF로 저장할 기록을 찾지 못했습니다.');
+  const html = buildReportHtml(record, { fontCssUrl:pathToFileURL(path.join(__dirname,'fonts','noto-sans-kr','index.css')).href });
+  const choice = await dialog.showSaveDialog(window, { title:'최종 보고서 PDF 저장', defaultPath:path.join(app.getPath('downloads'), reportFileName(record)),
+    filters:[{ name:'PDF 문서', extensions:['pdf'] }], properties:['showOverwriteConfirmation','createDirectory'] });
+  if (choice.canceled || !choice.filePath) return { canceled:true };
+  const temp = path.join(app.getPath('temp'), `yesornot-report-${randomUUID()}.html`);
+  pdfReportUrl = pathToFileURL(temp).href;
+  // A separate, script-free session that may read only this report file and the bundled fonts.
+  if (!pdfSession) {
+    const fontsUrl = pathToFileURL(path.join(__dirname,'fonts') + path.sep).href;
+    pdfSession = session.fromPartition('report-pdf');
+    pdfSession.webRequest.onBeforeRequest((details,callback) => callback({ cancel:details.url !== pdfReportUrl && !details.url.startsWith(fontsUrl) }));
+    pdfSession.setPermissionRequestHandler((_contents,_permission,callback) => callback(false));
+  }
+  const pdfWindow = new BrowserWindow({ show:false, webPreferences:{ session:pdfSession, javascript:false, sandbox:true, contextIsolation:true, nodeIntegration:false } });
+  try {
+    await fs.writeFile(temp, html, 'utf8');
+    await pdfWindow.loadFile(temp);
+    const pdf = await pdfWindow.webContents.printToPDF({ pageSize:'A4', printBackground:true });
+    await fs.writeFile(choice.filePath, pdf);
+    return { canceled:false, fileName:path.basename(choice.filePath) };
+  } finally {
+    pdfWindow.destroy();
+    await fs.rm(temp, { force:true }).catch(() => {});
+  }
+}
 function formatResult(record) {
   const lines = [record.question, '', `실행: ${record.createdAt}`, `상태: ${record.status}`];
   if (record.preparation) {
-    lines.push('', '사전 검토와 사용자 답변');
-    for (const item of record.preparation.questions || []) lines.push(`${item.required ? '[필수]' : '[선택]'} ${item.question}`, record.answers?.[item.id] || '(답변 없음)');
+    lines.push('', '사전 검토와 사용자 답변' + (Number.isFinite(record.preparation.readiness) ? ` (인터뷰 준비도 ${record.preparation.readiness}%)` : ''));
+    for (const item of [...(record.preparation.answeredQuestions || []), ...(record.preparation.questions || [])]) lines.push(`${item.required ? '[필수]' : '[선택]'} ${item.question}`, record.answers?.[item.id] || '(답변 없음)');
   }
   if (record.attachments?.length) {
     lines.push('', '첨부 자료');
@@ -286,6 +318,7 @@ if (startup) app.whenReady().then(async () => {
     if (!record) throw new Error('복사할 기록을 찾지 못했습니다.');
     clipboard.writeText(formatResult(record)); return true;
   });
+  handle('decision:report-pdf', exportReportPdf);
   createWindow();
   updates.start();
 }).catch(() => { process.stderr.write('앱 초기화에 실패했습니다. 설치 파일과 사용자 데이터 경로를 확인하세요.\n'); app.quit(); });

@@ -1,0 +1,94 @@
+'use strict';
+
+// Builds a static, script-free HTML page for printToPDF. Every value is escaped.
+const CHOICES = { YES: 'YES', NO: 'NO', CONDITIONAL: '조건부 권고', HOLD: '판단 보류' };
+const NAMES = { claude: 'Claude', codex: 'ChatGPT', gemini: 'Gemini' };
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+}
+function paragraphs(text) {
+  return String(text || '').split(/\n\s*\n/u).map(part => part.trim()).filter(Boolean)
+    .map(part => `<p>${escapeHtml(part).replace(/\n/g, '<br>')}</p>`).join('');
+}
+function dateLabel(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? '' : date.toLocaleString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function reportFileName(record) {
+  const date = new Date(record?.createdAt);
+  const stamp = Number.isNaN(date.valueOf()) ? 'report' : date.toISOString().slice(0, 10);
+  return `YES-or-NO-최종보고서-${stamp}.pdf`;
+}
+
+function buildReportHtml(record, { fontCssUrl = '' } = {}) {
+  const synthesis = record?.evaluation?.synthesis;
+  if (!record || synthesis?.status !== 'complete') throw Object.assign(new Error('최종 보고서가 완성된 판단만 PDF로 저장할 수 있습니다.'), { code: 'NO_FINAL_REPORT' });
+  const verdict = record.evaluation.verdict || {};
+  const review = synthesis.finalReview;
+  const sections = synthesis.report?.version === 1 && Array.isArray(synthesis.report.sections) && synthesis.report.sections.length
+    ? synthesis.report.sections.map(section => `<h3>${escapeHtml(section.title)}</h3>${paragraphs(section.text)}`).join('')
+    : paragraphs(synthesis.text);
+  const meta = [
+    ['판정', CHOICES[verdict.choice] || verdict.choice || '—'],
+    ['작성일', dateLabel(record.completedAt || record.createdAt)],
+    ['답변 품질 평균', Number.isFinite(record.evaluation.qualityAverage) ? record.evaluation.qualityAverage + '/100' : '—'],
+    ...(Number.isFinite(record.preparation?.readiness) ? [['인터뷰 준비도', record.preparation.readiness + '%']] : []),
+    ...(review && Number.isFinite(review.score) ? [['최종 검토', `${review.score}점 · ${review.status === 'passed' ? '통과' : '미통과'}`]] : []),
+  ].map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
+
+  const opinions = (record.opinions || []).filter(opinion => opinion.status === 'success').map(opinion => {
+    const score = record.evaluation.opinions?.find(row => row.providerId === opinion.providerId)?.total;
+    return `<tr><td>${escapeHtml(NAMES[opinion.providerId] || opinion.name || opinion.providerId)}</td><td>${escapeHtml(CHOICES[opinion.stance] || opinion.stance || '')}</td><td>${escapeHtml(opinion.title || '')}<br><span class="muted">${escapeHtml(opinion.point || '')}</span></td><td>${Number.isFinite(score) ? escapeHtml(score.toFixed(1)) : '—'}</td></tr>`;
+  }).join('');
+
+  const asked = [...(record.preparation?.answeredQuestions || []), ...(record.preparation?.questions || [])];
+  const interview = asked.map(item => `<li><strong>${escapeHtml(item.question)}</strong><br>${escapeHtml(record.answers?.[item.id] || '(답변 없음)')}</li>`).join('');
+
+  const sources = (record.research?.sources || []).filter(source => source.verification !== 'unavailable')
+    .map(source => `<li><strong>[${escapeHtml(source.id)}]</strong> ${escapeHtml(source.title || source.url)} · ${escapeHtml(source.publisher || '')} · ${escapeHtml(source.date || '발행일 미확인')}<br><span class="url">${escapeHtml(source.url)}</span></li>`).join('');
+
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' file:; font-src file:">
+<title>${escapeHtml(synthesis.title || '최종 보고서')}</title>
+${fontCssUrl ? `<link rel="stylesheet" href="${escapeHtml(fontCssUrl)}">` : ''}
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  :root { --ink: #16181d; --text-2: #3d4250; --muted: #6b7180; --line: #e2e5eb; --accent: #4338ca; --soft: #eef0fb; }
+  * { box-sizing: border-box; }
+  body { margin: 0; width: 100%; font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; font-size: 10.5pt; line-height: 1.75; color: var(--ink); word-break: keep-all; overflow-wrap: anywhere; }
+  header { border-bottom: 2px solid var(--accent); padding-bottom: 10px; margin-bottom: 14px; }
+  .eyebrow { margin: 0; font-size: 8.5pt; font-weight: 700; letter-spacing: .08em; color: var(--accent); }
+  h1 { margin: 4px 0 0; font-size: 17pt; line-height: 1.4; }
+  .question { margin: 6px 0 0; color: var(--text-2); }
+  dl { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 12px 0 0; }
+  dt { font-size: 8.5pt; color: var(--muted); } dd { margin: 0; font-weight: 700; }
+  h2 { margin: 22px 0 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12.5pt; break-after: avoid; }
+  h3 { margin: 14px 0 4px; font-size: 11pt; color: var(--accent); break-after: avoid; }
+  p { margin: 0 0 8px; }
+  .point { margin: 12px 0; padding: 10px 12px; border-radius: 6px; background: var(--soft); font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { background: #f6f7f9; white-space: nowrap; }
+  tr { break-inside: avoid; }
+  ul { margin: 0; padding-left: 18px; } li { margin-bottom: 6px; break-inside: avoid; }
+  .muted, .url { color: var(--muted); } .url { font-size: 8.5pt; word-break: break-all; }
+  footer { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 8.5pt; color: var(--muted); }
+</style></head><body>
+<header>
+  <p class="eyebrow">YES or NO · 최종 보고서</p>
+  <h1>${escapeHtml(synthesis.title || '최종 권고')}</h1>
+  <p class="question">질문: ${escapeHtml(record.question)}</p>
+  <dl>${meta}</dl>
+</header>
+${synthesis.point ? `<p class="point">지금 할 일: ${escapeHtml(synthesis.point)}</p>` : ''}
+<section><h2>최종 권고</h2>${sections}</section>
+${opinions ? `<section><h2>AI별 의견</h2><table><thead><tr><th>AI</th><th>입장</th><th>요지</th><th>품질</th></tr></thead><tbody>${opinions}</tbody></table></section>` : ''}
+${interview ? `<section><h2>사전 인터뷰</h2><ul>${interview}</ul></section>` : ''}
+${sources ? `<section><h2>근거 출처</h2><ul>${sources}</ul></section>` : ''}
+<footer>이 보고서는 여러 AI의 조사·토론과 JEV 평가를 바탕으로 자동 작성되었습니다. 품질 점수와 판정 분포는 정답 확률이 아니며, 중요한 결정 전에는 원문 출처를 직접 확인하세요.</footer>
+</body></html>`;
+}
+
+module.exports = { buildReportHtml, reportFileName, escapeHtml };

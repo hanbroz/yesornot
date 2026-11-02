@@ -32,6 +32,52 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
       emit(run, 'complete');
     }
   }
+  // After each answer round the AIs re-score readiness; below the target they ask again.
+  async function interview(run, settings) {
+    const prep = run.record.preparation;
+    try {
+      prep.answeredQuestions = [...(prep.answeredQuestions || []), ...(prep.questions || [])];
+      prep.questions = [];
+      // Records saved before multi-round interviews count their first questionnaire as round 1.
+      prep.interview ||= { version: 1, target: 90, maxRounds: 5, rounds: [{ round: 1, score: prep.readiness ?? null, questionCount: prep.answeredQuestions.length }] };
+      const round = prep.interview.rounds.length + 1;
+      const final = round > prep.interview.maxRounds;
+      run.record.status = 'preparing'; emit(run);
+      const result = await researchService.reassess({
+        question: run.record.question, preparation: prep, answers: run.record.answers, attachments: run.documents, round, final,
+        apiKey: getApiKey(), model: settings.model, cwd, signal: run.controller.signal, timeoutMs: settings.timeoutMs,
+        onProgress: progress => { run.record.researchProgress = progress; emit(run); },
+      });
+      if (run.controller.signal.aborted) throw new Error('취소됨');
+      prep.readiness = result.score;
+      prep.interview.rounds.push({ round, score: result.score, questionCount: result.questions.length, assessments: result.assessments });
+      if (result.questions.length && !final) {
+        prep.questions = result.questions;
+        run.record.status = 'awaiting_input';
+        await store.saveRecord(run.record);
+        // cancel() finishes an awaiting run itself; do not announce it again.
+        if (run.controller.signal.aborted) return;
+        emit(run, 'awaiting_input');
+        return;
+      }
+    } catch (error) {
+      // Questions that were never shown must not block research.
+      prep.questions = [];
+      if (run.controller.signal.aborted) {
+        if (current !== run) return;
+        run.record.status = 'canceled';
+        run.record.completedAt = new Date().toISOString();
+        try { await store.saveRecord(run.record); } catch { run.record.saveError = '기록 저장에 실패했습니다.'; }
+        if (current === run) current = null;
+        emit(run, 'complete');
+        return;
+      }
+      // A failed re-score must not discard the answers already collected; research continues.
+      prep.interview.error = { code: typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(error.code) ? error.code : 'READINESS_FAILED', message: error?.message || '인터뷰 준비도를 다시 평가하지 못했습니다.' };
+    }
+    run.record.status = 'researching';
+    await execute(run, settings);
+  }
   async function execute(run, settings) {
     try {
       if (researchService) {
@@ -53,7 +99,7 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
         if (run.controller.signal.aborted) { target.status = 'canceled'; return; }
         target.status = 'running'; emit(run);
         try {
-          Object.assign(target, await getOpinion(provider.id, run.record.question, { cwd, signal: run.controller.signal, timeoutMs: settings.timeoutMs, researchContext: run.record.research?.context,
+          Object.assign(target, await getOpinion(provider.id, run.record.question, { cwd, signal: run.controller.signal, timeoutMs: settings.timeoutMs, researchContext: run.record.research?.debateContext || run.record.research?.context,
             onProgress: debate => {
               if (target.status !== 'running' || !['claude','codex'].includes(provider.id) || debate?.version !== 1 || !Array.isArray(debate.agents)) return;
               target.debate = structuredClone(debate);
@@ -91,6 +137,7 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
       });
       if (run.controller.signal.aborted) { run.record.evaluation = null; run.record.status = 'canceled'; return; }
       run.record.status = opinions.length === providers.length && run.record.evaluation?.synthesis?.status !== 'error' &&
+        !['not-passed', 'error'].includes(run.record.evaluation?.synthesis?.finalReview?.status) &&
         !run.record.evaluation?.refinement?.reviews?.some(review => review.status === 'error') && (!run.record.research || run.record.research.status === 'complete') ? 'complete' : 'partial';
     } catch (error) {
       run.record.status = run.controller.signal.aborted ? 'canceled' : 'failed';
@@ -150,12 +197,12 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
       if (!answers || typeof answers !== 'object' || Array.isArray(answers) || Object.entries(answers).some(([id, value]) =>
         !questions.some(question => question.id === id) || typeof value !== 'string' || value.length > 4000)) throw new Error('사전 답변 형식을 확인해 주세요. 항목당 4,000자까지 입력할 수 있습니다.');
       if (questions.some(question => question.required && !answers[question.id]?.trim())) throw new Error('필수 사전 질문에 답해 주세요. 알 수 없다면 모름이라고 적어 주세요.');
-      run.record.answers = structuredClone(answers);
+      run.record.answers = { ...(run.record.answers || {}), ...structuredClone(answers) };
       if (attachments) run.documents = structuredClone(attachments);
       run.record.intakeDocuments = structuredClone(run.documents);
       run.record.attachments = run.documents.map(({ id, name, size, truncated, warning }) => ({ id, name, size, truncated, warning }));
-      run.record.status = 'researching';
-      run.done = new Promise(resolve => setImmediate(resolve)).then(() => execute(run, run.settings));
+      run.record.status = researchService?.reassess ? 'preparing' : 'researching';
+      run.done = new Promise(resolve => setImmediate(resolve)).then(() => researchService?.reassess ? interview(run, run.settings) : execute(run, run.settings));
       return { runId: run.record.id };
     },
     async cancel() {

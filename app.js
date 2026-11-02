@@ -116,19 +116,21 @@ function updateRunActivity() {
     const phase = progress?.phase;
     title = phase === 'consolidating-intake' ? '유사한 질문을 합치고 있습니다.'
       : phase === 'judging-preparation' ? 'JEV가 추가 질문과 자료 요청을 평가하고 있습니다.'
+      : phase === 'assessing-readiness' ? '답변을 반영해 인터뷰 준비도를 다시 평가하고 있습니다.'
       : 'AI가 질문과 자료를 검토하고 있습니다.';
     detail = phase === 'planning' ? (count ? 'AI 사전 검토 응답 ' + count + ' 완료 · ' : '') + '남은 AI의 응답을 기다리고 있습니다.'
       : phase === 'consolidating-intake' ? (Number.isInteger(progress?.candidates) ? '추가 질문 후보 ' + progress.candidates + '개 · ' : '') + '중복을 정리하고 질문을 명확하게 다듬고 있습니다.'
       : phase === 'judging-preparation' ? '확인이 필요한 개인 조건과 공개 조사로 찾을 자료를 구분하고 있습니다.'
+      : phase === 'assessing-readiness' ? '준비도가 90% 미만이면 필요한 정보를 한 번 더 여쭙니다.'
       : 'AI 응답을 기다리고 있습니다. 잠시 시간이 걸릴 수 있습니다.';
   } else if (status === 'researching') {
-    title = { 'refining-queries': '답변을 반영해 검색 범위를 보완하고 있습니다.', researching: '뉴스·논문·공식 자료를 검색하고 있습니다.', 'verifying-sources': '원문과 출처를 확인하고 있습니다.' }[progress?.phase] || '판단에 필요한 자료를 조사하고 있습니다.';
+    title = { 'refining-queries': '답변을 반영해 검색 범위를 보완하고 있습니다.', researching: 'AI별 조사 에이전트가 공식 자료·논문·뉴스·커뮤니티·반대 근거를 나눠 검색하고 있습니다.', 'verifying-sources': '원문과 출처를 확인하고 있습니다.' }[progress?.phase] || '판단에 필요한 자료를 조사하고 있습니다.';
     detail = (count ? '현재 단계 ' + count + ' 완료 · ' : '') + '확인한 근거를 모아 AI 토론에 전달합니다.';
   } else if (status === 'running') {
     title = 'AI가 수집한 근거를 바탕으로 토론하고 있습니다.';
     detail = (viewed?.opinions || []).filter(item => ['success', 'error', 'canceled'].includes(item.status)).length + '/3개 AI 처리 완료 · 상세 진행은 아래 토론 카드에서 확인할 수 있습니다.';
   } else if (status === 'evaluating') {
-    title = { 'model-reviewing': '각 AI가 JEV 판정을 재검증하고 있습니다.', 'jev-refining': 'JEV가 보완된 의견을 재평가하고 있습니다.', synthesizing: '최종 실행안을 작성하고 있습니다.' }[viewed?.evaluationStage] || 'JEV가 AI 의견을 평가하고 있습니다.';
+    title = { 'model-reviewing': '각 AI가 JEV 판정을 재검증하고 있습니다.', 'jev-refining': 'JEV가 보완된 의견을 재평가하고 있습니다.', synthesizing: '최종 실행안을 작성하고 있습니다.', 'final-review': '독립 AI가 최종 보고서의 적합성을 검토하고 있습니다.' }[viewed?.evaluationStage] || 'JEV가 AI 의견을 평가하고 있습니다.';
     detail = '검토가 완료되면 다음 단계로 진행합니다.';
   }
   // Keep elapsed ticks outside the live region so screen readers announce only real stage changes.
@@ -292,7 +294,7 @@ function probabilityEntries(probabilities) {
 }
 function renderSynthesis(record) {
   const synthesis = record.evaluation?.synthesis;
-  const pending = record.status === 'evaluating' && record.evaluationStage === 'synthesizing';
+  const pending = record.status === 'evaluating' && ['synthesizing', 'final-review'].includes(record.evaluationStage);
   const complete = synthesis?.status === 'complete';
   const failed = synthesis?.status === 'error';
   $('synthesis-panel').hidden = !pending && !complete && !failed;
@@ -309,6 +311,21 @@ function renderSynthesis(record) {
       reportBody.append(block);
     }
   } else reportBody.textContent = complete ? synthesis.text : pending ? 'JEV 평가를 반영해 최종 의견을 종합하고 있어요.' : failed ? (synthesis.error || '최종 종합 요청에 실패했습니다. 수집된 의견과 JEV 평가는 개별 AI 카드에서 확인할 수 있습니다.') : '';
+  const review = complete && synthesis.finalReview;
+  if (review && Array.isArray(review.rounds)) {
+    const box = element('section', 'final-review' + (review.status === 'passed' ? ' is-passed' : ' is-warn'));
+    const names = (review.reviewers || []).map((id) => PROVIDERS.find((provider) => provider.id === id)?.name || id).join('·');
+    box.append(element('h6', '', review.status === 'passed' ? '최종 보고서 적합성 검토 통과 · ' + review.score + '점' : review.status === 'error' ? '최종 보고서 적합성 검토를 완료하지 못했습니다' : '최종 보고서 적합성 검토 미통과 · ' + review.score + '점 (기준 ' + review.target + '점)'),
+      element('p', 'detail-meta', [names ? names + ' 독립 검토' : '', review.rounds.length > 1 ? (review.rounds.length - 1) + '회 보완' : '', '작성 AI는 자기 보고서를 검토하지 않습니다'].filter(Boolean).join(' · ')));
+    const last = review.rounds.at(-1);
+    const issues = review.status === 'passed' ? [] : (last?.reviews || []).flatMap((row) => row.issues || []);
+    if (issues.length) {
+      const list = element('ul', 'research-agent-list');
+      for (const issue of issues.slice(0, 8)) list.append(element('li', '', issue));
+      box.append(element('p', 'detail-meta', '남은 지적 사항'), list);
+    }
+    reportBody.append(box);
+  }
   $('synthesis-point').textContent = complete && synthesis.point ? '지금 할 일: ' + synthesis.point : '';
   $('synthesis-point').hidden = !complete || !synthesis.point;
   const writer = PROVIDERS.find((provider) => provider.id === synthesis?.providerId);
@@ -424,7 +441,7 @@ async function transferQuestionnaire(action) {
   const status = $('questionnaire-status');
   if (status) status.textContent = '';
   try {
-    const result = await operation({ runId, ...(action === 'download' ? { answers: { ...clarificationAnswers } } : {}) });
+    const result = await operation({ runId, ...(action === 'download' ? { answers: currentAnswers() } : {}) });
     if (result?.canceled) return;
     if (activeId !== runId || viewed?.id !== runId || viewed?.status !== 'awaiting_input') return;
     if (action === 'upload') {
@@ -465,13 +482,19 @@ async function continueRun() {
   pendingContinue = true;
   setControls();
   try {
-    await bridge.continueRun({ runId: activeId, answers: { ...clarificationAnswers }, attachmentIds: attachments.map((file) => file.id) });
+    await bridge.continueRun({ runId: activeId, answers: currentAnswers(), attachmentIds: attachments.map((file) => file.id) });
   } catch (error) {
     const notice = $('clarification-error');
     if (notice) { notice.textContent = message(error); notice.hidden = false; }
     else toast(message(error));
   } finally { pendingContinue = false; setControls(); }
 }
+// Only the current round's answers are sent; earlier rounds are already stored on the record.
+function currentAnswers() {
+  const ids = new Set((viewed?.preparation?.questions || []).map((item) => item.id));
+  return Object.fromEntries(Object.entries(clarificationAnswers).filter(([id, value]) => ids.has(id) && String(value).trim()));
+}
+function interviewRound(prep) { return Math.max(1, prep?.interview?.rounds?.length || 1); }
 function renderPreparation(record) {
   const panel = $('preparation-panel');
   const prep = record.preparation;
@@ -480,14 +503,26 @@ function renderPreparation(record) {
   if (panel.hidden) return;
   if (record.error) panel.append(element('p', 'form-error', record.error));
   const waiting = record.status === 'awaiting_input';
-  if (waiting && clarificationRunId !== record.id) {
-    clarificationRunId = record.id;
+  if (waiting && clarificationRunId !== record.id + ':' + interviewRound(prep)) {
+    clarificationRunId = record.id + ':' + interviewRound(prep);
     clarificationAnswers = { ...(record.answers || {}) };
     attachments = Array.isArray(record.attachments) ? [...record.attachments] : [];
     renderAttachments();
   }
-  panel.append(element('p', 'eyebrow', 'DECISION BRIEF'), element('h3', '', waiting ? '먼저 판단의 전제를 확인해 주세요.' : record.status === 'preparing' ? record.researchProgress?.phase === 'consolidating-intake' ? 'AI별 질문에서 중복을 합치고 문장을 정리하고 있어요.' : 'AI와 JEV가 질문의 명확성과 자료의 충분성을 검토하고 있어요.' : '사전 확인과 조사 계획'));
+  panel.append(element('p', 'eyebrow', 'DECISION BRIEF'), element('h3', '', waiting ? '먼저 판단의 전제를 확인해 주세요.' : record.status === 'preparing' ? record.researchProgress?.phase === 'consolidating-intake' ? 'AI별 질문에서 중복을 합치고 문장을 정리하고 있어요.' : record.researchProgress?.phase === 'assessing-readiness' ? '답변을 반영해 인터뷰 준비도를 다시 평가하고 있어요.' : 'AI와 JEV가 질문의 명확성과 자료의 충분성을 검토하고 있어요.' : '사전 확인과 조사 계획'));
   panel.append(element('p', 'research-intro', waiting ? prep?.intakeReview?.policy === 'single-fact-essential-only' ? '판단 방향을 바꾸는 필수 정보만 한 항목에 하나씩 확인합니다. 공개 자료는 직접 조사하며, 가정을 명시해 진행할 수 있는 질문은 생략했습니다. 모르는 값은 “모름”으로 적어도 됩니다.' : '공개 자료는 이어지는 조사에서 찾습니다. 개인 상황이나 내부 자료처럼 외부에서 확인하기 어려운 내용에 답변해 주세요. 모르는 값은 “모름”으로 적어도 됩니다.' : '각 AI와 JEV가 질문과 자료를 먼저 검토합니다. 필요한 경우에만 추가 질문이나 자료를 요청하며, 추가 확인이 필요 없으면 공개 자료 조사를 바로 진행합니다.'));
+  if (finite(prep?.readiness)) {
+    const target = prep.interview?.target || 90;
+    const meter = element('div', 'readiness-meter' + (prep.readiness >= target ? ' is-ready' : ''));
+    const bar = element('progress');
+    bar.max = 100;
+    bar.value = prep.readiness;
+    bar.setAttribute('aria-label', '인터뷰 준비도');
+    meter.append(element('strong', '', '인터뷰 준비도 ' + prep.readiness + '% · 목표 ' + target + '%'), bar,
+      element('p', 'detail-meta', (waiting ? interviewRound(prep) + '차 질문 · ' : '') + (prep.readiness >= target ? '조사와 토론을 시작할 만큼 정보가 모였습니다.' : '목표에 닿을 때까지 필요한 정보를 차례로 여쭙니다. 최대 ' + (prep.interview?.maxRounds || 5) + '차까지 묻습니다.')));
+    panel.append(meter);
+  }
+  if (prep?.interview?.error) panel.append(element('p', 'detail-meta', '준비도 재평가 실패로 지금까지의 답변으로 진행했습니다: ' + publicText(prep.interview.error.message)));
   if (prep?.consolidation?.version === 1) {
     panel.append(element('p', 'detail-meta', '질문 정리 · AI 제안 ' + prep.consolidation.inputCount + (prep?.intakeReview?.policy === 'single-fact-essential-only' ? '개 → 단일 질문 ' : '개 → 통합 ') + prep.consolidation.outputCount + '개 · JEV가 선택한 추가 확인 ' + (prep.questions?.length || 0) + '개'));
   }
@@ -563,17 +598,19 @@ function renderPreparation(record) {
     error.id = 'clarification-error';
     error.hidden = true;
     error.setAttribute('role', 'alert');
-    const submit = element('button', 'primary-button', '답변 반영 · 자료 조사 시작');
+    const submit = element('button', 'primary-button', '답변 반영 · 준비도 다시 평가');
     submit.id = 'continue-run';
     submit.type = 'submit';
     submit.disabled = pendingContinue || attachmentPending || questionnairePending;
     submit.append(icon('i-arrow'));
     form.append(error, submit);
     panel.append(form);
-  } else if (questions.length) {
+  }
+  const answered = waiting ? (prep?.answeredQuestions || []) : [...(prep?.answeredQuestions || []), ...questions];
+  if (answered.length) {
     const details = element('details', 'research-details');
-    details.append(element('summary', '', '확인한 사전 질문 ' + questions.length + '개'));
-    for (const item of questions) {
+    details.append(element('summary', '', (waiting ? '이전에 답한 사전 질문 ' : '확인한 사전 질문 ') + answered.length + '개'));
+    for (const item of answered) {
       details.append(element('h4', '', item.question));
       const answer = record.answers?.[item.id] || record.clarificationAnswers?.[item.id];
       if (answer) details.append(element('p', '', answer));
@@ -769,7 +806,14 @@ function renderResearch(record) {
     const details = element('details', 'research-details');
     details.append(element('summary', '', '조사 보고서와 교차 검토'));
     for (const report of research.reports) {
-      details.append(element('h4', '', report.title || report.providerId || '조사 보고서'), element('p', 'research-report', report.text || report.summary || report.error || ''));
+      const reportName = PROVIDERS.find((provider) => provider.id === report.providerId)?.name || report.title || report.providerId || '조사 보고서';
+      details.append(element('h4', '', reportName + (Array.isArray(report.agents) ? ' · 조사 에이전트 ' + report.agents.filter((agent) => agent.status === 'success').length + '/' + report.agents.length : '')));
+      if (Array.isArray(report.agents) && report.agents.length) {
+        const list = element('ul', 'research-agent-list');
+        for (const agent of report.agents) list.append(element('li', agent.status === 'success' ? '' : 'is-failed', agent.label + ' — ' + (agent.status === 'success' ? '검색 ' + (agent.queryCount || 0) + '회 · 출처 ' + (agent.sourceCount || 0) + '개' : '실패 (' + (agent.errorCode || '오류') + ')')));
+        details.append(list);
+      }
+      details.append(element('p', 'research-report', report.text || report.summary || report.error || ''));
       for (const markup of [report.provenance?.searchEntryPoint, report.followup?.provenance?.searchEntryPoint].filter(value => typeof value === 'string' && value)) {
         const suggestions = element('iframe', 'google-search-suggestions');
         suggestions.title = 'Google Search 검색 제안';
@@ -804,9 +848,9 @@ function renderRecord(record) {
   $('results-content').hidden = beforeDebate;
   $('empty-result').hidden = true;
   $('result-badge').textContent = STATUS[record.status] || record.status;
-  const stageLabels = { 'model-reviewing': '각 AI가 JEV 판정을 재검증하고 있어요.', 'jev-refining': 'JEV가 보완된 의견을 재평가하고 있어요.', synthesizing: '최종 실행안을 작성하고 있어요.' };
+  const stageLabels = { 'final-review': '독립 AI가 최종 보고서가 결론으로 적합한지 검토하고 있어요.', 'model-reviewing': '각 AI가 JEV 판정을 재검증하고 있어요.', 'jev-refining': 'JEV가 보완된 의견을 재평가하고 있어요.', synthesizing: '최종 실행안을 작성하고 있어요.' };
   $('run-status').textContent = [record.status === 'evaluating' ? stageLabels[record.evaluationStage] || 'JEV 중간 판정 중' : STATUS[record.status] || record.status, beforeDebate ? '' : successful + '/3개 응답', timeLabel(record.createdAt)].filter(Boolean).join(' · ');
-  const currentStep = record.status === 'running' ? 0 : record.evaluationStage === 'model-reviewing' ? 2 : record.evaluationStage === 'jev-refining' ? 3 : record.evaluationStage === 'synthesizing' ? 4 : 1;
+  const currentStep = record.status === 'running' ? 0 : record.evaluationStage === 'model-reviewing' ? 2 : record.evaluationStage === 'jev-refining' ? 3 : ['synthesizing', 'final-review'].includes(record.evaluationStage) ? 4 : 1;
   const completedSteps = [successful > 0 && record.status !== 'running', Boolean(evaluation || (!isTerminal && currentStep > 1)), Boolean(evaluation?.refinement?.reviews?.some((review) => review.status === 'complete') || (!isTerminal && currentStep > 2)), Boolean(evaluation?.refinement?.reviewedEvaluation || (!isTerminal && currentStep > 3)), evaluation?.synthesis?.status === 'complete'];
   ['step-question', 'step-opinions', 'step-jev', 'step-refine', 'step-final'].forEach((id, index) => {
     $(id).className = 'process-step' + (!isTerminal && index === currentStep ? ' running' : completedSteps[index] ? ' complete' : '');
@@ -844,6 +888,7 @@ function renderRecord(record) {
   $('overall-score').textContent = score(evaluation?.qualityAverage);
   $('score-bar').value = finite(evaluation?.qualityAverage) ? evaluation.qualityAverage : 0;
   $('copy-result').disabled = !bridge || !isTerminal;
+  $('export-pdf').disabled = !bridge || !isTerminal || evaluation?.synthesis?.status !== 'complete';
   $('save-state').textContent = record.saveError ? '기록 저장 실패 · 현재 화면에서 확인하세요' : isTerminal ? '이 기기에 저장된 실행 기록' : '진행 중';
   $('save-state').classList.toggle('save-error', Boolean(record.saveError));
   $('common-ground').textContent = successful + '개 의견 수집 · ' + (evaluation?.opinions?.length || 0) + '개 답변 품질 평가' + (evaluation ? ' · 평가 모델 ' + evaluation.model : '') + (record.error ? ' · ' + record.error : '') + (record.saveError ? ' · 기록 저장 실패: ' + record.saveError : '');
@@ -1160,6 +1205,16 @@ $('settings-form').addEventListener('submit', async (event) => {
     $('connection-dialog').close();
   } catch (error) { $('connection-message').textContent = message(error); }
   finally { setControls(); }
+});
+$('export-pdf').addEventListener('click', async () => {
+  if (!bridge?.exportReportPdf || !viewed || viewed.evaluation?.synthesis?.status !== 'complete') return;
+  const button = $('export-pdf');
+  button.disabled = true;
+  try {
+    const result = await bridge.exportReportPdf(viewed.id);
+    if (!result?.canceled) toast('최종 보고서를 PDF로 저장했습니다: ' + result.fileName);
+  } catch (error) { toast(message(error)); }
+  finally { button.disabled = false; }
 });
 $('copy-result').addEventListener('click', async () => {
   if (!bridge || !viewed || !terminal(viewed.status)) return;
