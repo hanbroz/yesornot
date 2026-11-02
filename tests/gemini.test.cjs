@@ -230,3 +230,15 @@ test('response body network failure is sanitized like an initial fetch failure',
   assert.equal(result.reason, 'NETWORK_ERROR');
   assert.ok(!JSON.stringify(result).includes(KEY));
 });
+
+test('Google error text is shown in Korean context with the suggested model and without the key', async () => {
+  const meta = json({ name: 'models/gemini-2.5-pro', supportedGenerationMethods: ['generateContent'] });
+  const retired = { error: { code: 404, message: `This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview. key=${KEY}` } };
+  const result = await inspectConnection({ apiKey: KEY, model: 'gemini-2.5-pro', fetchImpl: async (url) => url.endsWith(':generateContent') ? json(retired, 404) : meta.clone() });
+  assert.equal(result.reason, 'MODEL_UNAVAILABLE');
+  assert.match(result.message, /신규 사용자에게 더 이상 제공하지 않습니다/);
+  assert.match(result.message, /gemini-3\.1-pro-preview 모델을 쓰라고/);
+  assert.match(result.message, /Google 응답 HTTP 404: This model/);
+  assert.ok(!result.message.includes(KEY));
+  assert.deepEqual(result.models, ['gemini-2.5-pro', 'gemini-3.1-pro-preview']);
+});

@@ -71,6 +71,31 @@ async function readJsonBounded(response, limit, signal) {
   catch { throw failure('INVALID_RESPONSE', 'Gemini API가 올바른 JSON 응답을 반환하지 않았습니다.'); }
 }
 
+// Google's own error text is the real cause; keep it (without the key) next to a Korean summary.
+function googleFailure(status, data, key) {
+  const original = String(data?.error?.message || '').split(key).join('[비공개]').replace(/\s+/g, ' ').trim().slice(0, 400);
+  const suggested = /use (?:models\/)?(gemini-[a-z0-9][a-z0-9._-]{0,119})/i.exec(original)?.[1]?.replace(/[.-]+$/, '');
+  let code, summary;
+  if (data?.error?.details?.some?.(item => item.reason === 'API_KEY_INVALID') || /api.?key.*(?:not valid|invalid|expired)/i.test(original)) {
+    code = 'AUTH_REQUIRED'; summary = 'Gemini API 키가 유효하지 않습니다. 연결 설정에서 키를 다시 입력해 주세요.';
+  } else if (status === 401 || status === 403) {
+    code = 'AUTH_REQUIRED'; summary = 'Gemini API 키에 이 기능을 쓸 권한이 없습니다.';
+  } else if (status === 402) {
+    code = 'BILLING_REQUIRED'; summary = 'Google 계정의 Gemini 선불 크레딧이 모두 소진되었습니다. Google AI Studio에서 크레딧을 충전하거나 결제 설정을 확인해 주세요.';
+  } else if (status === 404 && /no longer available/i.test(original)) {
+    code = 'MODEL_UNAVAILABLE'; summary = 'Google이 이 모델을 신규 사용자에게 더 이상 제공하지 않습니다.' + (suggested ? ` Google은 대신 ${suggested} 모델을 쓰라고 안내합니다.` : ' 다른 모델을 선택해 주세요.');
+  } else if (status === 404) {
+    code = 'MODEL_UNAVAILABLE'; summary = '선택한 Gemini 모델을 이 API 키로 찾을 수 없습니다. 다른 모델을 선택해 주세요.';
+  } else if (status === 429) {
+    code = 'RATE_LIMIT'; summary = 'Gemini API 사용 한도에 도달했습니다. 잠시 후 다시 시도하거나 Google AI Studio에서 한도를 확인해 주세요.';
+  } else {
+    code = 'API_ERROR'; summary = 'Gemini API 요청이 거절되었습니다.';
+  }
+  const error = failure(code, `${summary} (Google 응답 HTTP ${status}${original ? ': ' + original : ''})`);
+  if (suggested) error.suggestedModel = suggested;
+  return error;
+}
+
 async function requestJson(suffix, { key, signal, timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl = globalThis.fetch, method = 'GET', body, maxResponseBytes = MAX_RESPONSE_BYTES } = {}) {
   if (typeof fetchImpl !== 'function') throw failure('NETWORK_ERROR', '이 실행 환경에서 Gemini API 요청을 지원하지 않습니다.');
   if (signal?.aborted) throw failure('ABORTED', '요청이 취소되었습니다.');
@@ -101,19 +126,12 @@ async function requestJson(suffix, { key, signal, timeoutMs = DEFAULT_TIMEOUT_MS
       });
     } catch { throw failure('NETWORK_ERROR', 'Gemini API에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.'); }
     if (!response || !Number.isInteger(response.status)) throw failure('INVALID_RESPONSE', 'Gemini API 응답을 확인하지 못했습니다.');
-    if ([401, 402, 403, 404, 429].includes(response.status)) {
-      response.body?.cancel?.().catch(() => {});
-      if (response.status === 401 || response.status === 403) throw failure('AUTH_REQUIRED', 'Gemini API 키 또는 API 접근 권한을 확인해 주세요.');
-      if (response.status === 402) throw failure('BILLING_REQUIRED', 'Gemini API 선불 크레딧이 소진되었습니다. Google AI Studio에서 결제와 크레딧을 확인해 주세요.');
-      if (response.status === 404) throw failure('MODEL_UNAVAILABLE', '선택한 Gemini 모델은 이 API 키로 사용할 수 없습니다. 신규 사용자에게 종료된 모델일 수 있으니 다른 모델을 선택해 주세요.');
-      throw failure('RATE_LIMIT', 'Gemini API 사용 한도에 도달했습니다. Google AI Studio에서 한도와 프로젝트 설정을 확인해 주세요.');
-    }
-    const data = await readJsonBounded(response, limit, controller.signal);
-    if (!response.ok || data?.error) {
-      const invalidKey = data?.error?.details?.some?.(item => item.reason === 'API_KEY_INVALID') || /api.?key.*(?:not valid|invalid|expired)/i.test(String(data?.error?.message || ''));
-      if (invalidKey) throw failure('AUTH_REQUIRED', 'Gemini API 키가 유효하지 않습니다. 연결 설정에서 키를 다시 입력해 주세요.');
-      throw failure('API_ERROR', `Gemini API 요청을 완료하지 못했습니다 (HTTP ${response.status}). 모델과 프로젝트 설정을 확인해 주세요.`);
-    }
+    let data;
+    if (!response.ok) {
+      try { data = await readJsonBounded(response, Math.min(limit, 64 * 1024), controller.signal); }
+      catch { response.body?.cancel?.().catch(() => {}); }
+    } else data = await readJsonBounded(response, limit, controller.signal);
+    if (!response.ok || data?.error) throw googleFailure(response.status, data, key);
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw failure('INVALID_RESPONSE', 'Gemini API 응답 형식이 올바르지 않습니다.');
     return data;
   };
@@ -154,6 +172,7 @@ async function inspectConnection(options = {}) {
     return { ...base,
       authenticated: ['NOT_CONFIGURED', 'INVALID_API_KEY', 'AUTH_REQUIRED'].includes(error.code) ? false : null,
       message: error.message, reason: error.code || 'API_ERROR',
+      ...(error.suggestedModel ? { models: [base.version, error.suggestedModel] } : {}),
       action: ['NOT_CONFIGURED', 'INVALID_API_KEY', 'AUTH_REQUIRED'].includes(error.code) ? 'configure_api_key' : 'check_api_settings',
     };
   }
