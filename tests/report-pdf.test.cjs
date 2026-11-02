@@ -36,3 +36,9 @@ test('a run without a completed final report cannot be exported', () => {
   assert.throws(() => buildReportHtml(record({ evaluation: { synthesis: { status: 'error' } } })), { code: 'NO_FINAL_REPORT' });
   assert.equal(reportFileName(record()), 'YES-or-NO-최종보고서-2026-11-02.pdf');
 });
+
+test('a binary verdict shows the estimated YES/NO probabilities next to the decision', () => {
+  const base = record();
+  base.evaluation.verdict = { choice: 'YES', probabilities: { YES: 0.62, NO: 0.38 } };
+  assert.match(buildReportHtml(base), /YES \(YES 62% · NO 38%\)/);
+});

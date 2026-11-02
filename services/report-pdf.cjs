@@ -31,7 +31,7 @@ function buildReportHtml(record, { fontCssUrl = '' } = {}) {
     ? synthesis.report.sections.map(section => `<h3>${escapeHtml(section.title)}</h3>${paragraphs(section.text)}`).join('')
     : paragraphs(synthesis.text);
   const meta = [
-    ['판정', CHOICES[verdict.choice] || verdict.choice || '—'],
+    ['판정', (CHOICES[verdict.choice] || verdict.choice || '—') + (Number.isFinite(verdict.probabilities?.YES) && Number.isFinite(verdict.probabilities?.NO) && Object.keys(verdict.probabilities).length === 2 ? ` (YES ${Math.round(verdict.probabilities.YES * 100)}% · NO ${Math.round(verdict.probabilities.NO * 100)}%)` : '')],
     ['작성일', dateLabel(record.completedAt || record.createdAt)],
     ['답변 품질 평균', Number.isFinite(record.evaluation.qualityAverage) ? record.evaluation.qualityAverage + '/100' : '—'],
     ...(Number.isFinite(record.preparation?.readiness) ? [['인터뷰 준비도', record.preparation.readiness + '%']] : []),

@@ -31,6 +31,8 @@ Windows Electron 의사결정 앱입니다. 첫 질문에는 바로 결론을 �
 
 Node.js 24와 공식 Claude Code / Codex CLI를 사용합니다. Claude·ChatGPT는 이 PC의 구독 로그인을 재사용하며, Gemini는 Gemini Developer API를 직접 호출합니다. 로컬 앱을 사용해도 추론은 각 제공사의 클라우드에서 처리됩니다.
 
+질문이나 사전 답변에 웹사이트 주소(예: `devcare.co.kr`)가 있으면 [ego 브라우저(ego lite)](https://lite.ego.app/ko)로 그 사이트와 가격·약관·소개 같은 주요 하위 페이지를 직접 열어 본문을 확인하고, 토론과 JEV 평가에 「대상 사이트(직접 확인)」 출처로 전달합니다. ego 브라우저가 설치되지 않았으면 사이트 주소가 있는 판단은 시작하지 않으며, 연결 설정의 ego 브라우저 카드에서 설치 페이지를 열 수 있습니다.
+
 Gemini는 Google AI Studio의 Free Tier 프로젝트에서 발급한 키를 `.env`의 `GEMINI_API_KEY`에 설정합니다. 기본 모델은 `gemini-3.5-flash-lite`이며, 선택 변수 `GEMINI_MODEL`로 변경할 수 있습니다. 무료 등급 여부와 실제 할당량은 AI Studio에서 확인해야 합니다. API 키 유효성 확인만으로 무료 등급을 판별할 수 없습니다. 모델 메타데이터로 연결을 확인하며, 이 확인은 의견 생성 요청을 보내지 않습니다. 앱은 결제를 설정하거나 다른 모델·유료 경로로 자동 전환하지 않습니다. 무료 API 입력·출력은 Google의 개선과 검토에 사용될 수 있으므로 기밀·개인정보를 보내지 마세요. [키 발급](https://aistudio.google.com/apikey), [무료 등급](https://ai.google.dev/gemini-api/docs/billing), [데이터 조건](https://ai.google.dev/gemini-api/terms#unpaid-services).
 
 ## 사전 질문과 공개 자료 조사

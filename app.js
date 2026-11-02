@@ -7,7 +7,7 @@ const PROVIDERS = [
   { id: 'codex', name: 'ChatGPT', symbol: 'G', css: 'gpt-avatar', color: 'gpt-color' },
   { id: 'gemini', name: 'Gemini', symbol: '✦', css: 'gemini-avatar', color: 'gemini-color' }
 ];
-const SOURCE_KINDS = { official: '공식 자료', paper: '논문·연구', news: '뉴스', counter: '반대 근거', community: '커뮤니티', github: 'GitHub' };
+const SOURCE_KINDS = { site: '대상 사이트(직접 확인)', official: '공식 자료', paper: '논문·연구', news: '뉴스', counter: '반대 근거', community: '커뮤니티', github: 'GitHub' };
 const STATUS = { preparing: '사전 검토 중', awaiting_input: '추가 답변 대기', researching: '자료 조사 중', running: '의견 수집 중', evaluating: 'JEV 평가 중', complete: '평가 완료', partial: '평가 완료 · 일부 한계 있음', failed: '실행 실패', canceled: '취소됨' };
 const SAMPLES = {
   launch: '새로운 서비스를 완성 전에 먼저 공개해도 될까요? 핵심 기능은 동작하며, 소규모 사용자에게 베타로 공개하려고 합니다.',
@@ -20,7 +20,8 @@ const CONNECTIONS = [
   { id: 'claude', title: 'Claude CLI', kind: 'cli', icon: 'claude-avatar', symbol: '✳' },
   { id: 'codex', title: 'ChatGPT · Codex CLI', kind: 'cli', icon: 'gpt-avatar', symbol: 'G' },
   { id: 'gemini', title: 'Gemini · API', kind: 'api', icon: 'gemini-avatar', symbol: '✦' },
-  { id: 'jev', title: 'JEV 평가 · API', kind: 'api', icon: 'jev-mark', symbol: 'j.' }
+  { id: 'jev', title: 'JEV 평가 · API', kind: 'api', icon: 'jev-mark', symbol: 'j.' },
+  { id: 'ego', title: 'ego 브라우저 · 사이트 직접 확인', kind: 'cli', icon: 'ego-mark', symbol: 'e' }
 ];
 const connectionCards = {};
 const checkingConnections = new Set();
@@ -65,6 +66,13 @@ function score(value) { return finite(value) ? value.toFixed(1).replace(/\.0$/, 
 function percent(value) { return finite(value) ? (value * 100).toFixed(1) + '%' : '—'; }
 function busy() { return pendingStart || activeId !== null; }
 function terminal(status) { return !['preparing', 'awaiting_input', 'researching', 'running', 'evaluating'].includes(status); }
+// Binary JEV verdicts carry the estimated chance that each side is the better decision.
+function leanOf(verdict) {
+  const yes = verdict?.probabilities?.YES, no = verdict?.probabilities?.NO;
+  if (!finite(yes) || !finite(no) || Object.keys(verdict.probabilities).length !== 2) return null;
+  const margin = Math.abs(yes - no);
+  return { yes, no, strength: margin < 0.1 ? '근소한 차이' : margin < 0.3 ? '뚜렷한 차이' : '큰 차이' };
+}
 function choiceLabel(choice) { return choice === 'YES' ? 'YES' : choice === 'NO' ? 'NO' : choice === 'CONDITIONAL' ? '조건부 권고' : choice === 'HOLD' ? '판단 보류' : '—'; }
 function timeLabel(date) {
   const parsed = new Date(date);
@@ -191,7 +199,7 @@ function renderHistory() {
     }
     const archived = element('button', 'archive-item');
     const verdict = record.evaluation?.verdict;
-    archived.append(element('strong', '', record.question), element('small', '', [timeLabel(record.createdAt), STATUS[record.status] || record.status, verdict ? choiceLabel(verdict.choice) : '평가 없음'].filter(Boolean).join(' · ')));
+    archived.append(element('strong', '', record.question), element('small', '', [timeLabel(record.createdAt), STATUS[record.status] || record.status, verdict ? choiceLabel(verdict.choice) + (leanOf(verdict) ? ' ' + percent(verdict.choice === 'NO' ? leanOf(verdict).no : leanOf(verdict).yes) : '') : '평가 없음'].filter(Boolean).join(' · ')));
     archived.addEventListener('click', () => selectRecord(record));
     $('archive-list').append(archived);
   }
@@ -863,7 +871,8 @@ function renderRecord(record) {
   $('verdict-heading').textContent = evaluation?.refinement?.reviewedEvaluation ? 'JEV 재평가와 최종 실행안' : record.status === 'evaluating' ? 'JEV 판정과 AI 재검증' : 'JEV 평가와 최종 의견';
   $('verdict-label').textContent = verdict ? choiceLabel(verdict.choice) : '—';
   $('verdict-label').className = 'verdict-word' + (verdict?.choice === 'NO' ? ' verdict-no' : verdict?.choice === 'HOLD' || verdict?.choice === 'CONDITIONAL' ? ' verdict-hold' : '');
-  $('verdict-title').textContent = verdict ? verdict.choice === 'YES' ? '질문의 실행을 권고합니다.' : verdict.choice === 'NO' ? '질문의 실행을 권고하지 않습니다.' : verdict.choice === 'CONDITIONAL' ? '조건을 충족하는 실행안을 권고합니다.' : '추가 확인 후 결정하세요.' : record.status === 'evaluating' ? '답변 품질과 판단을 평가하고 있어요.' : isTerminal ? '최종 판단이 없습니다.' : '세 AI의 답변을 기다리고 있어요.';
+  const lean = leanOf(verdict);
+  $('verdict-title').textContent = verdict ? verdict.choice === 'YES' ? (lean ? '실행하는 쪽이 더 나은 선택입니다 · ' + lean.strength : '질문의 실행을 권고합니다.') : verdict.choice === 'NO' ? (lean ? '실행하지 않는 쪽이 더 나은 선택입니다 · ' + lean.strength : '질문의 실행을 권고하지 않습니다.') : verdict.choice === 'CONDITIONAL' ? '조건을 충족하는 실행안을 권고합니다.' : '추가 확인 후 결정하세요.' : record.status === 'evaluating' ? '답변 품질과 판단을 평가하고 있어요.' : isTerminal ? '최종 판단이 없습니다.' : '세 AI의 답변을 기다리고 있어요.';
   let description = '';
   if (verdict) {
     const reasons = [];
@@ -872,15 +881,26 @@ function renderRecord(record) {
     if (verdict.gateApplied && finite(verdict.confidenceThreshold) && finite(verdict.confidence) && verdict.confidence < verdict.confidenceThreshold) reasons.push('이전 정책으로 저장된 결과입니다. 당시 confidence 기준 ' + verdict.confidenceThreshold + '에 미달하여 판단을 보류했습니다.');
     if (verdict.gateApplied && !reasons.length) reasons.push('앱의 보류 기준이 적용되었습니다.');
     if (verdict.gateApplied && verdict.rawChoice) reasons.push('JEV 원래 판정: ' + choiceLabel(verdict.rawChoice) + '.');
-    if (!reasons.length) reasons.push('원래 질문과 수집한 의견에 대한 JEV의 별도 Choice 평가입니다.');
-    reasons.push('판정 confidence ' + percent(verdict.confidence) + ' · 정확도나 성공 확률을 의미하지 않습니다.');
+    if (!reasons.length && !lean) reasons.push('원래 질문과 수집한 의견에 대한 JEV의 별도 Choice 평가입니다.');
+    if (lean) reasons.push('JEV가 모든 AI 의견과 조사 근거를 종합해 각 선택이 더 나은 결정일 확률을 추정했습니다. 50%를 넘는 쪽을 권고합니다. AI 모델의 추정치이므로 결과를 보장하지는 않습니다.');
+    else reasons.push('판정 confidence ' + percent(verdict.confidence) + ' · 이전 방식으로 저장된 결과입니다.');
     description = reasons.join(' ');
   } else if (record.error) description = record.error;
   else if (record.status === 'canceled') description = '실행을 취소했습니다. 수집된 답변이 있으면 원문을 확인할 수 있습니다.';
   else description = record.status === 'evaluating' && stageLabels[record.evaluationStage] ? stageLabels[record.evaluationStage] : '각 AI의 의견을 JEV가 중간 판정한 뒤, 모든 응답 AI가 재검증합니다.';
   $('verdict-description').textContent = description;
   $('verdict-probabilities').replaceChildren();
-  if (verdict) {
+  if (lean) {
+    const bar = element('div', 'lean-bar');
+    bar.setAttribute('role', 'img');
+    bar.setAttribute('aria-label', 'YES ' + percent(lean.yes) + ', NO ' + percent(lean.no));
+    const yesPart = element('span', 'lean-yes', 'YES ' + percent(lean.yes));
+    const noPart = element('span', 'lean-no', 'NO ' + percent(lean.no));
+    yesPart.style.flexGrow = String(Math.max(lean.yes, 0.08));
+    noPart.style.flexGrow = String(Math.max(lean.no, 0.08));
+    bar.append(yesPart, noPart);
+    $('verdict-probabilities').append(element('span', 'distribution-label', '더 나은 결정일 확률 (JEV 추정)'), bar);
+  } else if (verdict) {
     $('verdict-probabilities').append(element('span', 'distribution-label', 'JEV 판정 분포'));
     for (const [name, value] of probabilityEntries(verdict.probabilities)) {
       if (finite(value)) $('verdict-probabilities').append(element('span', 'distribution-item', choiceLabel(name) + ' ' + percent(value)));
@@ -893,7 +913,7 @@ function renderRecord(record) {
   $('save-state').textContent = record.saveError ? '기록 저장 실패 · 현재 화면에서 확인하세요' : isTerminal ? '이 기기에 저장된 실행 기록' : '진행 중';
   $('save-state').classList.toggle('save-error', Boolean(record.saveError));
   $('common-ground').textContent = successful + '개 의견 수집 · ' + (evaluation?.opinions?.length || 0) + '개 답변 품질 평가' + (evaluation ? ' · 평가 모델 ' + evaluation.model : '') + (record.error ? ' · ' + record.error : '') + (record.saveError ? ' · 기록 저장 실패: ' + record.saveError : '');
-  $('next-check').textContent = evaluation?.refinement ? '품질은 최초 수집 답변의 점수입니다. 최종 의견은 각 AI의 재검증과 JEV 재평가를 반영한 실행안입니다. 공개 근거의 출처와 수집 상태는 조사 자료에서 확인하세요. 조건부 권고는 필요한 가정과 조건을 명시합니다. confidence는 판정 분포의 집중도입니다.' : evaluation ? '이 기록은 저장 당시의 평가와 종합 의견입니다. 재검증 과정이 저장되지 않은 과거 기록에 새 과정을 만들어 붙이지 않습니다. confidence는 판정 분포의 집중도이며 정답 확률이 아닙니다.' : '응답 오류는 연결 설정에서 확인하세요. 평가가 완료되지 않은 점수와 판단은 표시하지 않습니다.';
+  $('next-check').textContent = evaluation?.refinement ? '품질은 최초 수집 답변의 점수입니다. 최종 의견은 각 AI의 재검증과 JEV 재평가를 반영한 실행안입니다. 공개 근거의 출처와 수집 상태는 조사 자료에서 확인하세요. 조건부 권고는 필요한 가정과 조건을 명시합니다. confidence는 판정 분포의 집중도입니다.' : evaluation ? '이 기록은 저장 당시의 평가와 종합 의견입니다. 재검증 과정이 저장되지 않은 과거 기록에 새 과정을 만들어 붙이지 않습니다. YES/NO 확률은 JEV가 추정한 값이며, 품질 점수와는 별개입니다.' : '응답 오류는 연결 설정에서 확인하세요. 평가가 완료되지 않은 점수와 판단은 표시하지 않습니다.';
   renderSynthesis(record);
   renderRefinement(record);
 }
@@ -950,6 +970,7 @@ function connectionLabel(id) {
   return !state.installed ? '설치 필요' : '로그인 필요';
 }
 function connectionSteps(item, state) {
+  if (item.id === 'ego') return [['ego lite 설치', !!state?.installed], ['ego lite 첫 실행 안내 마치기', state?.authenticated === true], ['사용 가능', connectionUsable(item.id, state)]];
   if (item.kind === 'cli') return [['CLI 설치', !!state?.installed], ['터미널에서 로그인', state?.authenticated === true], ['사용 가능', connectionUsable(item.id, state)]];
   return [['API 키 입력', state?.configured === true], ['모델 선택', !!(item.id === 'jev' ? settings.model : geminiModel)], ['사용 가능 확인', connectionUsable(item.id, state)]];
 }
@@ -1020,7 +1041,8 @@ function renderConnections() {
     ref.check.disabled = locked || checking;
     if (item.kind === 'cli') {
       ref.setup.hidden = !state || usable;
-      ref.setup.textContent = state && !state.installed ? 'CLI 설치하기' : '터미널에서 로그인';
+      ref.setup.textContent = item.id === 'ego' ? (state && !state.installed ? 'ego 브라우저 설치 페이지 열기' : 'ego lite 앱을 열어 안내를 마쳐 주세요') : state && !state.installed ? 'CLI 설치하기' : '터미널에서 로그인';
+      if (item.id === 'ego' && state?.installed) ref.setup.hidden = true;
       ref.setup.disabled = locked || checking;
     } else {
       const current = item.id === 'jev' ? settings.model : geminiModel;
@@ -1053,6 +1075,17 @@ async function setupCli(id) {
   const installed = !!connectionState(id)?.installed;
   const ref = connectionCards[id];
   ref.setup.disabled = true;
+  if (id === 'ego') {
+    try {
+      await bridge.installEgo();
+      terminalOpened.add(id);
+      const notice = '설치 페이지를 열었습니다. ego lite를 내려받아 설치하고 앱의 첫 실행 안내를 마친 뒤 이 창으로 돌아오면 자동으로 다시 확인합니다.';
+      $('connection-message').textContent = notice;
+      toast(notice);
+    } catch (error) { toast(message(error)); }
+    finally { renderConnections(); }
+    return;
+  }
   try {
     await bridge.login(id);
     terminalOpened.add(id);
@@ -1150,7 +1183,10 @@ async function startRun() {
       activeId = result.runId;
       if (viewed?.id !== activeId) renderRecord({ id: activeId, question, createdAt: new Date().toISOString(), status: 'preparing', attachments: [...attachments], opinions: [] });
     }
-  } catch (error) { errorText(message(error)); activeId = null; }
+  } catch (error) {
+    errorText(message(error)); activeId = null;
+    if (/ego 브라우저/.test(message(error))) openDialog('connection-dialog');
+  }
   finally { pendingStart = false; setControls(); }
 }
 async function cancelRun() {

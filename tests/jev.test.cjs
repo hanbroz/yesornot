@@ -39,13 +39,14 @@ test('rubric has four five-level dimensions summing to 100 and an independent fi
   assert.equal(RUBRIC.reduce((sum, d) => sum + d.weight, 0), 100);
   assert.ok(RUBRIC.every((d) => d.levels.length === 5 && d.levels.every((v) => v.length > 10)));
   assert.equal(Object.keys(request.questions).length, 16);
-  assert.deepEqual(Object.keys(request.questions.verdict.criteria), ['YES', 'NO', 'CONDITIONAL']);
+  assert.deepEqual(Object.keys(request.questions.verdict.criteria), ['YES', 'NO']);
   assert.equal(request.questions.verdict.type, 'choice');
   assert.match(request.questions.verdict.instructions, /품질 점수/);
   assert.match(request.questions.verdict.instructions, /모든 후보 의견의 근거를 종합/);
   assert.match(request.questions.verdict.instructions, /어느 후보나 모델을 선택하는 문제가 아닙니다/);
-  assert.match(request.questions.verdict.instructions, /조건부 실행/);
-  assert.match(request.questions.verdict.criteria.CONDITIONAL, /조건부 권고/);
+  // The final verdict must lean to one side, even by a small margin.
+  assert.match(request.questions.verdict.instructions, /근소해도/);
+  assert.match(request.questions.verdict.instructions, /중립이나 판단 유보는 허용되지 않습니다/);
 });
 
 test('provider metadata is excluded and every score instruction explicitly identifies its target', () => {
@@ -88,7 +89,7 @@ test('fractional expected scores are accepted and normalized correctly', () => {
 
 test('low concentration never suppresses a best current recommendation, even with a legacy threshold option', () => {
   assert.equal(DEFAULT_CONFIDENCE_THRESHOLD, 0);
-  for (const choice of ['YES', 'NO', 'CONDITIONAL']) {
+  for (const choice of ['YES', 'NO']) {
     const payload = payloadFor(request, { choice, confidence: 0.2 });
     for (const options of [{}, { confidenceThreshold: 0.9 }]) {
       const result = parseEvaluationResponse(payload, opinions, options);
@@ -161,7 +162,8 @@ test('missing, mismatched and out-of-range API fields are rejected without any s
     (p) => { p.answers.verdict.type = 'score'; },
     (p) => { p.answers.verdict.choice = 'NO'; },
     (p) => { p.answers.verdict.confidence = NaN; },
-    (p) => { delete p.answers.verdict.probabilities.CONDITIONAL; },
+    (p) => { delete p.answers.verdict.probabilities.NO; },
+    (p) => { p.answers.verdict.probabilities.CONDITIONAL = 0; },
   ];
   for (const mutate of mutations) {
     const payload = payloadFor(request);
@@ -191,7 +193,7 @@ test('probability sums 0.99 and 1.01 caused by two-decimal rounding are accepted
     Object.assign(payload.answers.candidate_1_relevance, {
       score: 3.34, confidence: 0.68, probabilities: { 0: 0, 1: 0, 2: 0.02, 3: p3, 4: 0.36 },
     });
-    payload.answers.verdict.probabilities = { YES: p3 === 0.61 ? 0.89 : 0.91, NO: 0.05, CONDITIONAL: 0.05 };
+    payload.answers.verdict.probabilities = { YES: p3 === 0.61 ? 0.94 : 0.96, NO: 0.05 };
     const result = parseEvaluationResponse(payload, opinions);
     assert.equal(result.opinions[0].dimensions[3].probabilities[3], p3);
     assert.deepEqual(result.verdict.probabilities, payload.answers.verdict.probabilities);
@@ -203,7 +205,7 @@ test('rounding allowance still rejects impossible mass, gross score mismatch and
     (p) => { p.answers.candidate_1_logic.probabilities = { 0: 0, 1: 0, 2: 0, 3: 0.1, 4: 0.93 }; },
     (p) => { p.answers.candidate_1_logic.probabilities = { 0: 0, 1: 0, 2: 0, 3: 0.1, 4: 0.9 }; p.answers.candidate_1_logic.score = 3.8; },
     (p) => { p.answers.candidate_1_logic.probabilities[0] = -0.001; },
-    (p) => { p.answers.verdict.probabilities = { YES: 0.93, NO: 0.05, CONDITIONAL: 0.05 }; },
+    (p) => { p.answers.verdict.probabilities = { YES: 0.97, NO: 0.05 }; },
   ];
   for (const mutate of invalid) {
     const payload = payloadFor(request);

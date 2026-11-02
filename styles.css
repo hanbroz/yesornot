@@ -456,3 +456,9 @@ dialog::backdrop{background:rgba(20,23,31,.4);backdrop-filter:blur(2px)}
 .final-review h6{margin:0;font-size:14px}
 .final-review.is-passed h6{color:var(--ok)}
 .final-review.is-warn h6{color:var(--warn)}
+.lean-bar{display:flex;width:100%;height:34px;border-radius:8px;overflow:hidden;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums}
+.lean-bar span{display:flex;align-items:center;padding:0 10px;white-space:nowrap;color:#fff}
+.lean-yes{background:var(--yes)}
+.lean-no{justify-content:flex-end;background:var(--no, #c2410c)}
+.verdict-probabilities .distribution-label{flex-basis:100%}
+.model-icon.ego-mark{background:#111827;color:#fff;font-weight:800}

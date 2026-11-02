@@ -64,24 +64,24 @@ test('refined JEV sees anonymous originals, actual initial scores and reviewed-t
   assert.throws(() => jev.buildEvaluationRequest({ question, opinions: [{ providerId: 'unknown', text: '근거' }], phase: 'refined', reviewContext: { originalOpinions: originals, initialEvaluation: evaluation } }), { code: 'INVALID_INPUT' });
 });
 
-test('the real JEV parser and CLI parser integrate through two judging calls and permit a changed conditional final recommendation', async () => {
+test('the real JEV parser and CLI parser integrate through two judging calls and permit a changed final recommendation', async () => {
   const bodies = [], inferencePrompts = [];
   const evaluate = options => jev.evaluate({ ...options, fetchImpl: async (_url, request) => {
     const body = JSON.parse(request.body); bodies.push(body);
-    return { ok: true, status: 200, json: async () => payload(body, body.state.phase === 'initial' ? 'YES' : 'CONDITIONAL') };
+    return { ok: true, status: 200, json: async () => payload(body, body.state.phase === 'initial' ? 'YES' : 'NO') };
   } });
   const run = createSynthesizedEvaluation({ evaluate, getOpinion: async (providerId, _q, { prompt }) => {
     inferencePrompts.push(prompt);
     const final = prompt.includes('"phase":"final-synthesis"');
-    return { status: 'success', ...cli.parseOpinion(providerId, JSON.stringify({ stance: 'CONDITIONAL', title: final ? '조건을 확인한 뒤 시작' : '판정을 검증했습니다', body: final ? finalReport() : `${providerId} 검증: 최초 판정의 위험 보완을 수용하되 불명확한 가정을 조건으로 바꾸었습니다.`, point: '작은 시험의 중단 기준을 정하세요.' })) };
+    return { status: 'success', ...cli.parseOpinion(providerId, JSON.stringify({ stance: final ? 'NO' : 'CONDITIONAL', title: final ? '조건을 확인한 뒤 시작' : '판정을 검증했습니다', body: final ? finalReport() : `${providerId} 검증: 최초 판정의 위험 보완을 수용하되 불명확한 가정을 조건으로 바꾸었습니다.`, point: '작은 시험의 중단 기준을 정하세요.' })) };
   } });
   const result = await run({ question, opinions: originals, apiKey: 'fake-local-test-key', timeoutMs: 1000 });
   assert.equal(bodies.length, 2);
   assert.equal(inferencePrompts.length, 3);
   assert.equal(result.refinement.initialEvaluation.verdict.choice, 'YES');
   assert.equal(result.refinement.reviewedEvaluation.phase, 'refined');
-  assert.equal(result.verdict.choice, 'CONDITIONAL');
-  assert.equal(result.synthesis.stance, 'CONDITIONAL');
+  assert.equal(result.verdict.choice, 'NO');
+  assert.equal(result.synthesis.stance, 'NO');
   assert.equal(result.synthesis.status, 'complete');
   assert.equal(result.usage.input_tokens, 200);
   assert.equal(bodies[1].state.candidates.length, 2);

@@ -22,6 +22,7 @@ const { createAttachmentService } = require('./services/attachments.cjs');
 const { createQuestionnaireFiles } = require('./services/questionnaire-files.cjs');
 const { readBuildInfo } = require('./services/build-version.cjs');
 const { buildReportHtml, reportFileName } = require('./services/report-pdf.cjs');
+const siteReader = require('./services/site-reader.cjs');
 const { randomUUID } = require('node:crypto');
 const buildInfo = readBuildInfo(__dirname);
 const appTitle = 'YES or NO — JEV Decision Room · ' + (buildInfo ? 'ver. ' + buildInfo.buildVersion : '개발 모드');
@@ -39,6 +40,7 @@ const researchService = createResearchService({
     ? researchAdapters.getGeminiStructured(prompt, schema, { ...options, apiKey: geminiKey, model: geminiModel })
     : researchAdapters.getCliStructured(id, prompt, schema, options),
   judgePreparation: jev.judgePreparation, verifySources,
+  readSites: (urls, options) => siteReader.readSites(urls, options),
 });
 async function openSource(url) {
   if (typeof url !== 'string' || url.length > 4096) throw new Error('출처 주소를 확인해 주세요.');
@@ -113,7 +115,7 @@ async function saveApiKeys(payload) {
   }
   return { configured: { jev:!!apiKey, gemini:!!geminiKey } };
 }
-const CONNECTION_IDS = ['claude','codex','gemini','jev'];
+const CONNECTION_IDS = ['claude','codex','gemini','jev','ego'];
 const pendingChecks = new Set();
 async function inspectConnection(id) {
   if (id === 'gemini') {
@@ -124,6 +126,7 @@ async function inspectConnection(id) {
     const state = await jev.inspectConnection({ apiKey });
     return { ...state, message:[state.message,keyMessage].filter(Boolean).join(' ') };
   }
+  if (id === 'ego') return siteReader.inspectEgo();
   const [state] = await cli.inspectAll({ cwd:path.join(userData, 'cli-workspace'), providerIds:[id] });
   return state;
 }
@@ -237,7 +240,7 @@ function formatResult(record) {
       lines.push('', 'JEV 평가를 반영한 종합 의견', synthesis.title, synthesis.text, synthesis.point,
         `문장 작성: ${writer} | ${synthesis.model || '기본 모델'} | 반영한 의견: ${synthesis.sourceProviderIds.length}개`);
     } else if (synthesis?.status === 'error') lines.push('', `종합 의견 생성 실패: ${synthesis.error}`);
-    lines.push('', `JEV 최종 판정: ${verdict.choice}`, `원 판정: ${verdict.rawChoice || verdict.choice}`, `보류 사유: ${verdict.reasonCode || '없음'}`, `분포 집중도: ${verdict.confidence}`, `판정 분포: ${JSON.stringify(verdict.probabilities)}`, `평가 모델: ${record.evaluation.model}`, `답변 품질 평균: ${record.evaluation.qualityAverage}/100`, '품질 점수와 분포 집중도는 정답 확률이 아닙니다.');
+    lines.push('', `JEV 최종 판정: ${verdict.choice}` + (Number.isFinite(verdict.probabilities?.YES) && Number.isFinite(verdict.probabilities?.NO) ? ` (더 나은 결정일 확률 추정: YES ${Math.round(verdict.probabilities.YES * 100)}% · NO ${Math.round(verdict.probabilities.NO * 100)}%)` : ''), `원 판정: ${verdict.rawChoice || verdict.choice}`, `보류 사유: ${verdict.reasonCode || '없음'}`, `분포 집중도: ${verdict.confidence}`, `판정 분포: ${JSON.stringify(verdict.probabilities)}`, `평가 모델: ${record.evaluation.model}`, `답변 품질 평균: ${record.evaluation.qualityAverage}/100`, '품질 점수와 분포 집중도는 정답 확률이 아닙니다.');
   }
   if (record.error) lines.push('', record.error);
   return lines.filter(line => line !== undefined).join('\n');
@@ -292,6 +295,8 @@ if (startup) app.whenReady().then(async () => {
   handle('decision:start', payload => {
     if (!payload || typeof payload !== 'object') throw new Error('질문을 입력하세요.');
     if (!apiKey) throw new Error('JEV API 키가 없습니다. 연결 설정에서 키를 입력하세요.');
+    // A named site is always read in ego browser, so it must be installed before the run starts.
+    if (siteReader.findSiteUrls([String(payload.question || '')]).length && !siteReader.findEgo()) throw siteReader.egoRequired();
     return service.start({ question:payload.question, attachments:attachments.resolve(payload.attachmentIds || []) }, store.snapshot().settings);
   });
   handle('decision:continue', payload => {
@@ -313,6 +318,7 @@ if (startup) app.whenReady().then(async () => {
     return store.snapshot().settings;
   });
   handle('decision:login', login);
+  handle('decision:ego-install', async () => { await shell.openExternal(siteReader.EGO_DOWNLOAD_URL); return true; });
   handle('decision:copy', id => {
     const record = store.snapshot().history.find(r => r.id === id) || (lastCompletedRecord?.id === id ? lastCompletedRecord : null);
     if (!record) throw new Error('복사할 기록을 찾지 못했습니다.');

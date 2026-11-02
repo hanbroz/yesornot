@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('decisionApp', {
   cancelRun: () => invoke('decision:cancel'),
   saveSettings: payload => invoke('decision:settings', payload),
   login: id => invoke('decision:login', id),
+  installEgo: () => invoke('decision:ego-install'),
   copyResult: id => invoke('decision:copy', id),
   exportReportPdf: id => invoke('decision:report-pdf', id),
   onRunEvent: callback => {
