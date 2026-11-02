@@ -1,12 +1,13 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
-$appExe = Join-Path $projectRoot 'out\YESORNOT-win32-x64\YESORNOT.exe'
+$appExe = Join-Path $projectRoot 'out\YESORNO-win32-x64\YESORNO.exe'
 $devExe = Join-Path $projectRoot 'node_modules\electron\dist\electron.exe'
 $legacyExe = Join-Path $projectRoot 'out\YES or NOT-win32-x64\YES or NOT.exe'
+$previousExe = Join-Path $projectRoot 'out\YESORNOT-win32-x64\YESORNOT.exe'
 
 function Get-ProjectAppProcesses {
-    Get-Process -Name 'YESORNOT','YES or NOT','electron' -ErrorAction SilentlyContinue | Where-Object {
-        $_.Path -and ($_.Path.Equals($appExe, [StringComparison]::OrdinalIgnoreCase) -or $_.Path.Equals($devExe, [StringComparison]::OrdinalIgnoreCase) -or $_.Path.Equals($legacyExe, [StringComparison]::OrdinalIgnoreCase))
+    Get-Process -Name 'YESORNO','YESORNOT','YES or NOT','electron' -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -and ($_.Path.Equals($appExe, [StringComparison]::OrdinalIgnoreCase) -or $_.Path.Equals($devExe, [StringComparison]::OrdinalIgnoreCase) -or $_.Path.Equals($legacyExe, [StringComparison]::OrdinalIgnoreCase) -or $_.Path.Equals($previousExe, [StringComparison]::OrdinalIgnoreCase))
     }
 }
 
@@ -40,7 +41,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Build failed. The old package will not be launched.' }
     if (-not (Test-Path -LiteralPath $appExe -PathType Leaf)) { throw 'The packaged executable was not created.' }
 
-    Write-Host '[4/4] Opening YESORNOT...'
+    Write-Host '[4/4] Opening YES or NO...'
     $env:YESORNOT_ENV_FILE = Join-Path $projectRoot '.env'
     Start-Process -FilePath $appExe -WorkingDirectory (Split-Path -Parent $appExe) -WindowStyle Normal
 } catch {

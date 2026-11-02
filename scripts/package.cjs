@@ -5,7 +5,7 @@ const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { createBuildInfo } = require('../services/build-version.cjs');
 const root = path.resolve(__dirname,'..');
-const output = path.join(root,'out','YESORNOT-win32-x64');
+const output = path.join(root,'out','YESORNO-win32-x64');
 const allowlist = ['index.html','styles.css','fonts','app.js','main.cjs','preload.cjs','services','scripts/login.ps1','assets/app-icon.png','assets/app-icon.ico'];
 (async () => {
   // Fixed target beneath this workspace; never recursively remove a computed external path.
@@ -25,14 +25,14 @@ const allowlist = ['index.html','styles.css','fonts','app.js','main.cjs','preloa
   // Windows may briefly retain image/antivirus handles after the old app exits.
   for (let attempt = 0; ; attempt++) {
     try {
-      await fs.rename(path.join(output,'electron.exe'),path.join(output,'YESORNOT.exe'));
+      await fs.rename(path.join(output,'electron.exe'),path.join(output,'YESORNO.exe'));
       break;
     } catch (error) {
       if (!['EPERM','EACCES','EBUSY'].includes(error.code) || attempt >= 30) throw error;
       await new Promise(resolve => setTimeout(resolve,200));
     }
   }
-  const iconResult = spawnSync('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(root,'scripts','set-icon.ps1'),'-ExecutablePath',path.join(output,'YESORNOT.exe'),'-IconPath',path.join(root,'assets','app-icon.ico')], { encoding:'utf8', windowsHide:true });
+  const iconResult = spawnSync('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(root,'scripts','set-icon.ps1'),'-ExecutablePath',path.join(output,'YESORNO.exe'),'-IconPath',path.join(root,'assets','app-icon.ico')], { encoding:'utf8', windowsHide:true });
   if (iconResult.error || iconResult.status !== 0) throw new Error(`Could not embed app icon: ${iconResult.error?.message || iconResult.stderr || iconResult.stdout}`);
   const appDir = path.join(output,'resources','app');
   // Clear only our known app payload to prevent stale or secret files in repeated builds.
@@ -60,5 +60,5 @@ const allowlist = ['index.html','styles.css','fonts','app.js','main.cjs','preloa
   await inventory(appDir);
   await rejectStaleSecrets(output);
   await fs.writeFile(path.join(root,'.omx','reviews','package-manifest.json'),JSON.stringify({ version:pkg.version,buildVersion:buildInfo.buildVersion,electron:pkg.devDependencies.electron,createdAt:buildInfo.builtAt,files:hashes },null,2));
-  console.log(`Packaged: ${path.join(output,'YESORNOT.exe')} (${Object.keys(hashes).length} app files; no .env)`);
+  console.log(`Packaged: ${path.join(output,'YESORNO.exe')} (${Object.keys(hashes).length} app files; no .env)`);
 })().catch(error=>{ console.error(error.message);process.exitCode=1; });

@@ -19,8 +19,8 @@ module.exports = {
   win: {
     target: [{ target: 'nsis', arch: ['x64'] }],
     icon: 'assets/app-icon.ico',
-    executableName: 'YESORNOT',
-    artifactName: 'YESORNOT-Setup-${version}.${ext}',
+    executableName: 'YESORNO',
+    artifactName: 'YESORNO-Setup-${version}.${ext}',
     // This release has no Authenticode certificate. The updater still verifies
     // the release feed's SHA-512 over HTTPS; publisher identity is not signed.
     verifyUpdateCodeSignature: false,

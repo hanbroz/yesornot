@@ -6,7 +6,7 @@ Windows Electron 의사결정 앱입니다. 첫 질문에는 바로 결론을 �
 
 ## Windows 설치와 업데이트
 
-[GitHub Releases](https://github.com/hanbroz/yesornot/releases/latest)에서 `YESORNOT-Setup-버전.exe`를 내려받아 설치합니다. 사용자별 설치이며 기존 `%APPDATA%/YESorNOT` 기록과 암호화 키를 유지합니다. 현재 배포본은 Authenticode 서명이 없어 Windows SmartScreen 경고가 나타날 수 있습니다.
+[GitHub Releases](https://github.com/hanbroz/yesornot/releases/latest)에서 `YESORNO-Setup-버전.exe`를 내려받아 설치합니다. 사용자별 설치이며 기존 `%APPDATA%/YESorNOT` 기록과 암호화 키를 유지합니다. 현재 배포본은 Authenticode 서명이 없어 Windows SmartScreen 경고가 나타날 수 있습니다.
 
 연결 및 평가 설정에서 **JEV API 키**와 **Gemini API 키**를 입력하고 **API 키 저장**을 누릅니다. 빈 입력란은 기존 키를 유지하며, 저장된 키는 다시 표시하지 않습니다. 키는 Windows 사용자 계정에 연결된 암호화 저장소 파일에 보관하고, 암호화 저장이 불가능하면 저장을 거절합니다. 설정 화면에서 저장한 키가 개발용 `.env`보다 우선합니다. Claude Code와 Codex는 별도로 공식 CLI를 설치하고 구독 계정으로 로그인해야 합니다.
 
@@ -23,7 +23,7 @@ Windows Electron 의사결정 앱입니다. 첫 질문에는 바로 결론을 �
 ## 실행
 
 - `run.bat`: 소스 검사 → 이 프로젝트의 기존 앱 종료 → 최신 소스·디자인으로 재빌드 → 새 앱을 일반 창으로 실행합니다. 검사·빌드 실패 시 이전 패키지를 실행하지 않습니다.
-- 재빌드 없이 실행: `out/YESORNOT-win32-x64/YESORNOT.exe`
+- 재빌드 없이 실행: `out/YESORNO-win32-x64/YESORNO.exe`
 - 개발 실행: `npm install` 후 `npm start`
 - 검증: `npm test`, `npm run check`
 - Windows 포터블 빌드: `npm run package`

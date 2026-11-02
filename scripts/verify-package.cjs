@@ -5,7 +5,7 @@ const {parseEnv} = require('node:util');
 const {createHash} = require('node:crypto');
 const {spawnSync} = require('node:child_process');
 const root=path.resolve(__dirname,'..');
-const output=path.join(root,'out','YESORNOT-win32-x64');
+const output=path.join(root,'out','YESORNO-win32-x64');
 (async()=>{
  const config=parseEnv(await fs.readFile(path.join(root,'.env'),'utf8'));
  const keys=[config.JEV_API_KEY?.trim(),config.GEMINI_API_KEY?.trim()].filter(Boolean);
@@ -28,6 +28,6 @@ const output=path.join(root,'out','YESORNOT-win32-x64');
    checks.push(relative);
   }finally{await fs.unlink(file);}
  }
- await fs.writeFile(path.join(root,'.omx/reviews/package-verification.json'),JSON.stringify({verifiedAt:new Date().toISOString(),manifestFiles:Object.keys(manifest.files).length,matchingHashes:true,noKeyInPayload:true,rejectedStalePayloads:checks,executable:path.join(output,'YESORNOT.exe')},null,2));
+ await fs.writeFile(path.join(root,'.omx/reviews/package-verification.json'),JSON.stringify({verifiedAt:new Date().toISOString(),manifestFiles:Object.keys(manifest.files).length,matchingHashes:true,noKeyInPayload:true,rejectedStalePayloads:checks,executable:path.join(output,'YESORNO.exe')},null,2));
  console.log('Package hashes, private-key exclusion and stale-payload rejection passed.');
 })().catch(error=>{console.error(error.message);process.exitCode=1;});

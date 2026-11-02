@@ -41,7 +41,7 @@ async function main() {
   try {
     await build({ projectDir: root, config: { ...config, afterPack: context => validatePayload(context.appOutDir) }, targets: Platform.WINDOWS.createTarget(['nsis'], Arch.x64), publish: 'never' });
     const pkg = require('../package.json');
-    const names = [`YESORNOT-Setup-${pkg.version}.exe`, `YESORNOT-Setup-${pkg.version}.exe.blockmap`, 'latest.yml'];
+    const names = [`YESORNO-Setup-${pkg.version}.exe`, `YESORNO-Setup-${pkg.version}.exe.blockmap`, 'latest.yml'];
     const sums = [];
     for (const name of names) {
       const bytes = await fs.readFile(path.join(root, 'dist', name));
