@@ -25,7 +25,10 @@ const { buildReportHtml, reportFileName } = require('./services/report-pdf.cjs')
 const siteReader = require('./services/site-reader.cjs');
 const { randomUUID } = require('node:crypto');
 const buildInfo = readBuildInfo(__dirname);
-const appTitle = 'YES or NO — JEV Decision Room · ' + (buildInfo ? 'ver. ' + buildInfo.buildVersion : '개발 모드');
+// The title names the app version and whether this copy can update itself, so an
+// old portable build is never mistaken for the latest release.
+const updatable = process.platform === 'win32' && app.isPackaged && existsSync(path.join(process.resourcesPath, 'app-update.yml'));
+const appTitle = 'YES or NO v' + app.getVersion() + ' — JEV Decision Room · ' + (buildInfo ? 'ver. ' + buildInfo.buildVersion : '개발 모드') + (updatable ? '' : ' · 자동 업데이트 없음');
 const { createResearchService } = require('./services/research.cjs');
 const researchAdapters = require('./services/research-adapters.cjs');
 const { verifySources, publicUrl } = require('./services/evidence.cjs');
@@ -57,7 +60,7 @@ const store = createStore(userData);
 let lastCompletedRecord = null;
 let window, service, apiKey = '', keyMessage = '', geminiKey = '', geminiKeyMessage = '', geminiModel = gemini.DEFAULT_MODEL, connections = { providers:[], jev:{ configured:false, connected:false, models:[], message:'연결 확인 전' } }, connectionPromise;
 const updates = createUpdateService({
-  enabled: process.platform === 'win32' && app.isPackaged && existsSync(path.join(process.resourcesPath, 'app-update.yml')),
+  enabled: updatable,
   currentVersion: app.getVersion(),
   getUpdater: () => require('electron-updater').autoUpdater,
   isBusy: () => !!service?.active(),
