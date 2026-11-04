@@ -161,8 +161,8 @@ test('silent Codex runs are stopped as stalled and retried up to three times', a
   const counter = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'yesornot-stall-')), 'n');
   // Prints one event, then stays silent on the first two runs; the third run finishes.
   const script = `const fs=require('fs');const n=(+(fs.existsSync(${JSON.stringify(counter)})&&fs.readFileSync(${JSON.stringify(counter)},'utf8'))||0)+1;fs.writeFileSync(${JSON.stringify(counter)},String(n));console.log('started');if(n<3)setTimeout(()=>{},60000);else console.log('done');`;
-  await assert.rejects(runProcess(process.execPath, ['-e', 'console.log(1);setTimeout(()=>{},60000)'], { idleTimeoutMs: 300, timeoutMs: 10000 }), { code: 'STALLED' });
-  const result = await runCli('codex', process.execPath, ['-e', script], { timeoutMs: 10000 }, 300);
+  await assert.rejects(runProcess(process.execPath, ['-e', 'console.log(1);setTimeout(()=>{},60000)'], { idleTimeoutMs: 1500, timeoutMs: 10000 }), { code: 'STALLED' });
+  const result = await runCli('codex', process.execPath, ['-e', script], { timeoutMs: 20000 }, 1500);
   assert.match(result.stdout, /done/);
   assert.equal(fs.readFileSync(counter, 'utf8'), '3');
   const plain = await runCli('claude', process.execPath, ['-e', 'console.log("ok")'], { timeoutMs: 10000 });

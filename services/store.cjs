@@ -9,13 +9,14 @@ function validateSettings(value) {
     throw new Error('모델 또는 제한 시간이 올바르지 않습니다.');
   }
   if (value.geminiModel !== undefined && (typeof value.geminiModel !== 'string' || !/^gemini-[a-z0-9][a-z0-9._-]{0,119}$/.test(value.geminiModel))) throw new Error('Gemini 모델이 올바르지 않습니다.');
-  return { model: value.model, timeoutMs: value.timeoutMs, ...(value.geminiModel ? { geminiModel: value.geminiModel } : {}) };
+  if (value.gateLevel !== undefined && !['strict', 'recommended', 'relaxed'].includes(value.gateLevel)) throw new Error('확정 기준이 올바르지 않습니다.');
+  return { model: value.model, timeoutMs: value.timeoutMs, ...(value.geminiModel ? { geminiModel: value.geminiModel } : {}), ...(value.gateLevel ? { gateLevel: value.gateLevel } : {}) };
 }
 const MAX_BYTES = 25 * 1024 * 1024;
 const finite = n => typeof n === 'number' && Number.isFinite(n);
 function validRecord(r) {
   if (!r || !/^[a-f0-9-]{36}$/.test(r.id) || typeof r.question !== 'string' || r.question.length > 4000 || !Array.isArray(r.opinions) || r.opinions.length > 3) return false;
-  if (!['preparing','awaiting_input','researching','running','evaluating','complete','partial','failed','canceled'].includes(r.status)) return false;
+  if (!['preparing','awaiting_input','researching','running','evaluating','complete','partial','inconclusive','failed','canceled'].includes(r.status)) return false;
   if (r.opinions.some(o => !o || !['claude','codex','gemini'].includes(o.providerId) || !['pending','running','success','error','canceled'].includes(o.status) || (o.status === 'success' && typeof o.text !== 'string'))) return false;
   const e = r.evaluation;
   if (e != null && (!Array.isArray(e.opinions) || !finite(e.qualityAverage) || !e.verdict || !['YES','NO','CONDITIONAL','HOLD'].includes(e.verdict.choice) || !finite(e.verdict.confidence) || !e.verdict.probabilities || typeof e.model !== 'string')) return false;

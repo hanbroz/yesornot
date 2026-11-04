@@ -19,19 +19,30 @@ function dateLabel(value) {
 function reportFileName(record) {
   const date = new Date(record?.createdAt);
   const stamp = Number.isNaN(date.valueOf()) ? 'report' : date.toISOString().slice(0, 10);
-  return `YES-or-NO-최종보고서-${stamp}.pdf`;
+  return `YES-or-NO-${record?.evaluation?.synthesis?.status === 'withheld' ? '판단불가' : '최종보고서'}-${stamp}.pdf`;
 }
 
 function buildReportHtml(record, { fontCssUrl = '' } = {}) {
   const synthesis = record?.evaluation?.synthesis;
-  if (!record || synthesis?.status !== 'complete') throw Object.assign(new Error('최종 보고서가 완성된 판단만 PDF로 저장할 수 있습니다.'), { code: 'NO_FINAL_REPORT' });
+  if (!record || !['complete', 'withheld'].includes(synthesis?.status)) throw Object.assign(new Error('최종 보고서가 완성된 판단만 PDF로 저장할 수 있습니다.'), { code: 'NO_FINAL_REPORT' });
+  // An unconfirmed result is exported as an inconclusive notice, never as a recommendation.
+  const withheld = synthesis.status === 'withheld';
+  const gate = record.evaluation.gate;
+  const interval = record.evaluation.verdict?.interval;
+  const pct = value => Number.isFinite(value) ? Math.round(value * 1000) / 10 + '%' : '—';
+  const gateHtml = gate ? `<section class="gate ${gate.passed ? 'passed' : 'failed'}"><h2>확정 기준 (${escapeHtml(gate.label)}) · ${gate.passed ? '통과' : '미달'}</h2>${interval ? `<p>${escapeHtml(CHOICES[interval.choice] || interval.choice)} 확률 ${pct(interval.mean)} · 95% 신뢰구간 ${pct(interval.lower)}~${pct(interval.upper)} (${escapeHtml(interval.n)}회 독립 측정)</p>` : ''}<ul>${(gate.checks || []).map(check => {
+    const unit = check.id === 'interval' ? pct : value => value + (check.id === 'readiness' ? '%' : '점');
+    return `<li>${check.passed ? '✓' : '✗'} ${escapeHtml(check.label)}: ${check.value === null || check.value === undefined ? '측정 안 됨' : escapeHtml(unit(check.value))} (기준 ${escapeHtml(unit(check.target))} 이상)</li>`;
+  }).join('')}</ul></section>` : '';
+  const missing = synthesis.missing;
+  const missingHtml = withheld ? `<section><h2>신뢰할 수 있는 결론을 내리려면 필요한 것</h2>${missing?.summary ? paragraphs(missing.summary) : ''}${missing?.userQuestions?.length ? `<h3>사용자에게 확인이 필요한 정보</h3><ul>${missing.userQuestions.map(item => `<li>${escapeHtml(item.question)}${item.why ? ` — ${escapeHtml(item.why)}` : ''}</li>`).join('')}</ul>` : ''}${missing?.researchQueries?.length ? `<h3>추가로 조사해야 할 자료</h3><ul>${missing.researchQueries.map(item => `<li>${escapeHtml(item.query)}${item.purpose ? ` — ${escapeHtml(item.purpose)}` : ''}</li>`).join('')}</ul>` : ''}</section>` : '';
   const verdict = record.evaluation.verdict || {};
   const review = synthesis.finalReview;
-  const sections = synthesis.report?.version === 1 && Array.isArray(synthesis.report.sections) && synthesis.report.sections.length
+  const sections = withheld ? '' : synthesis.report?.version === 1 && Array.isArray(synthesis.report.sections) && synthesis.report.sections.length
     ? synthesis.report.sections.map(section => `<h3>${escapeHtml(section.title)}</h3>${paragraphs(section.text)}`).join('')
     : paragraphs(synthesis.text);
   const meta = [
-    ['판정', (CHOICES[verdict.choice] || verdict.choice || '—') + (Number.isFinite(verdict.probabilities?.YES) && Number.isFinite(verdict.probabilities?.NO) && Object.keys(verdict.probabilities).length === 2 ? ` (YES ${Math.round(verdict.probabilities.YES * 100)}% · NO ${Math.round(verdict.probabilities.NO * 100)}%)` : '')],
+    [withheld ? '확정되지 않은 기울기(결론 아님)' : '판정', (CHOICES[verdict.choice] || verdict.choice || '—') + (Number.isFinite(verdict.probabilities?.YES) && Number.isFinite(verdict.probabilities?.NO) && Object.keys(verdict.probabilities).length === 2 ? ` (YES ${Math.round(verdict.probabilities.YES * 100)}% · NO ${Math.round(verdict.probabilities.NO * 100)}%)` : '')],
     ['작성일', dateLabel(record.completedAt || record.createdAt)],
     ['답변 품질 평균', Number.isFinite(record.evaluation.qualityAverage) ? record.evaluation.qualityAverage + '/100' : '—'],
     ...(Number.isFinite(record.preparation?.readiness) ? [['인터뷰 준비도', record.preparation.readiness + '%']] : []),
@@ -51,7 +62,7 @@ function buildReportHtml(record, { fontCssUrl = '' } = {}) {
 
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' file:; font-src file:">
-<title>${escapeHtml(synthesis.title || '최종 보고서')}</title>
+<title>${withheld ? '판단 불가 보고서' : escapeHtml(synthesis.title || '최종 보고서')}</title>
 ${fontCssUrl ? `<link rel="stylesheet" href="${escapeHtml(fontCssUrl)}">` : ''}
 <style>
   @page { size: A4; margin: 18mm 16mm; }
@@ -73,17 +84,21 @@ ${fontCssUrl ? `<link rel="stylesheet" href="${escapeHtml(fontCssUrl)}">` : ''}
   th { background: #f6f7f9; white-space: nowrap; }
   tr { break-inside: avoid; }
   ul { margin: 0; padding-left: 18px; } li { margin-bottom: 6px; break-inside: avoid; }
+  .withheld-banner { margin: 0 0 14px; padding: 12px 14px; border: 2px solid #b91c1c; border-radius: 6px; color: #b91c1c; font-weight: 700; }
+  .gate.failed h2 { color: #b91c1c; } .gate.passed h2 { color: #15803d; }
   .muted, .url { color: var(--muted); } .url { font-size: 8.5pt; word-break: break-all; }
   footer { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 8.5pt; color: var(--muted); }
 </style></head><body>
 <header>
-  <p class="eyebrow">YES or NO · 최종 보고서</p>
-  <h1>${escapeHtml(synthesis.title || '최종 권고')}</h1>
+  <p class="eyebrow">YES or NO · ${withheld ? '판단 불가 보고서 (확정되지 않음)' : '최종 보고서'}</p>
+  <h1>${withheld ? '판단 불가: 확정 기준을 통과한 결론을 만들지 못했습니다' : escapeHtml(synthesis.title || '최종 권고')}</h1>
   <p class="question">질문: ${escapeHtml(record.question)}</p>
   <dl>${meta}</dl>
 </header>
-${synthesis.point ? `<p class="point">지금 할 일: ${escapeHtml(synthesis.point)}</p>` : ''}
-<section><h2>최종 권고</h2>${sections}</section>
+${withheld ? '<p class="withheld-banner">이 문서는 최종 보고서가 아닙니다. 판정이 확정 기준을 통과하지 못했으므로 아래 기울기를 결론으로 사용하지 마세요.</p>' : ''}
+${gateHtml}
+${!withheld && synthesis.point ? `<p class="point">지금 할 일: ${escapeHtml(synthesis.point)}</p>` : ''}
+${withheld ? missingHtml : `<section><h2>최종 권고</h2>${sections}</section>`}
 ${opinions ? `<section><h2>AI별 의견</h2><table><thead><tr><th>AI</th><th>입장</th><th>요지</th><th>품질</th></tr></thead><tbody>${opinions}</tbody></table></section>` : ''}
 ${interview ? `<section><h2>사전 인터뷰</h2><ul>${interview}</ul></section>` : ''}
 ${sources ? `<section><h2>근거 출처</h2><ul>${sources}</ul></section>` : ''}

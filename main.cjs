@@ -14,7 +14,8 @@ const jev = require('./services/jev.cjs');
 const gemini = require('./services/gemini.cjs');
 const { createSynthesizedEvaluation } = require('./services/synthesis.cjs');
 const evaluateAndSynthesize = createSynthesizedEvaluation({ evaluate:jev.evaluate, getOpinion:(id, question, options) => id === 'gemini' ? gemini.getOpinion(question, { ...options, apiKey:geminiKey, model:geminiModel }) : cli.getOpinion(id, question, options),
-  getStructured:(id, prompt, schema, options) => id === 'gemini' ? researchAdapters.getGeminiStructured(prompt, schema, { ...options, apiKey:geminiKey, model:geminiModel }) : researchAdapters.getCliStructured(id, prompt, schema, options) });
+  getStructured:(id, prompt, schema, options) => id === 'gemini' ? researchAdapters.getGeminiStructured(prompt, schema, { ...options, apiKey:geminiKey, model:geminiModel }) : researchAdapters.getCliStructured(id, prompt, schema, options),
+  judgeVerdict:jev.judgeVerdict });
 const { loadSecret, saveSecret } = require('./services/credentials.cjs');
 const { createUpdateService } = require('./services/updates.cjs');
 const { existsSync } = require('node:fs');
@@ -259,12 +260,23 @@ function formatResult(record) {
       lines.push('', `JEV 재평가: ${refinement.reviewedEvaluation?.verdict?.choice || '완료되지 않음'}`,
         '재검증은 모델의 공개 근거 검토이며 외부 사실 확인을 보장하지 않습니다.');
     }
+    if (record.evaluation.gate) {
+      const gate = record.evaluation.gate, interval = verdict.interval;
+      lines.push('', `확정 기준(${gate.label}): ${gate.passed ? '통과' : '미달 — 이 결과를 결론으로 쓰지 마세요'}`);
+      if (interval) lines.push(`${interval.choice} 확률 ${Math.round(interval.mean * 1000) / 10}% · 95% 신뢰구간 ${Math.round(interval.lower * 1000) / 10}~${Math.round(interval.upper * 1000) / 10}% (${interval.n}회 독립 측정)`);
+      for (const check of gate.checks || []) lines.push(`${check.passed ? '✓' : '✗'} ${check.label}: ${check.value ?? '측정 안 됨'} (기준 ${check.target} 이상)`);
+    }
+    if (synthesis?.status === 'withheld') {
+      lines.push('', '판단 불가: 확정 기준을 통과한 결론을 만들지 못했습니다.', synthesis.missing?.summary || '');
+      for (const item of synthesis.missing?.userQuestions || []) lines.push(`확인 필요: ${item.question}`);
+      for (const item of synthesis.missing?.researchQueries || []) lines.push(`추가 조사 필요: ${item.query}`);
+    }
     if (synthesis?.status === 'complete') {
       const writer = cli.PROVIDERS.find(provider => provider.id === synthesis.providerId)?.name || synthesis.providerId;
       lines.push('', 'JEV 평가를 반영한 종합 의견', synthesis.title, synthesis.text, synthesis.point,
         `문장 작성: ${writer} | ${synthesis.model || '기본 모델'} | 반영한 의견: ${synthesis.sourceProviderIds.length}개`);
     } else if (synthesis?.status === 'error') lines.push('', `종합 의견 생성 실패: ${synthesis.error}`);
-    lines.push('', `JEV 최종 판정: ${verdict.choice}` + (Number.isFinite(verdict.probabilities?.YES) && Number.isFinite(verdict.probabilities?.NO) ? ` (더 나은 결정일 확률 추정: YES ${Math.round(verdict.probabilities.YES * 100)}% · NO ${Math.round(verdict.probabilities.NO * 100)}%)` : ''), `원 판정: ${verdict.rawChoice || verdict.choice}`, `보류 사유: ${verdict.reasonCode || '없음'}`, `분포 집중도: ${verdict.confidence}`, `판정 분포: ${JSON.stringify(verdict.probabilities)}`, `평가 모델: ${record.evaluation.model}`, `답변 품질 평균: ${record.evaluation.qualityAverage}/100`, '품질 점수와 분포 집중도는 정답 확률이 아닙니다.');
+    lines.push('', (record.evaluation.gate && !record.evaluation.gate.passed ? `확정되지 않은 기울기(결론 아님): ${verdict.choice}` : `JEV 최종 판정: ${verdict.choice}`) + (Number.isFinite(verdict.probabilities?.YES) && Number.isFinite(verdict.probabilities?.NO) ? ` (더 나은 결정일 확률 추정: YES ${Math.round(verdict.probabilities.YES * 100)}% · NO ${Math.round(verdict.probabilities.NO * 100)}%)` : ''), `원 판정: ${verdict.rawChoice || verdict.choice}`, `보류 사유: ${verdict.reasonCode || '없음'}`, `분포 집중도: ${verdict.confidence}`, `판정 분포: ${JSON.stringify(verdict.probabilities)}`, `평가 모델: ${record.evaluation.model}`, `답변 품질 평균: ${record.evaluation.qualityAverage}/100`, '품질 점수와 분포 집중도는 정답 확률이 아닙니다.');
   }
   if (record.error) lines.push('', record.error);
   return lines.filter(line => line !== undefined).join('\n');

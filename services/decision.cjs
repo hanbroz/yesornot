@@ -2,6 +2,10 @@
 const { randomUUID } = require('node:crypto');
 const { createAttachmentService } = require('./attachments.cjs');
 
+// A run whose report fails the confirmation gate asks or researches again this many times
+// before it ends as inconclusive.
+const MAX_CONFIDENCE_CYCLES = 2;
+
 function createDecisionService({ providers, getOpinion, evaluate, store, getApiKey, cwd, researchService, onEvent = () => {} }) {
   let current = null;
   const emit = (run, type = 'update') => onEvent({ runId: run.record.id, type, record: structuredClone(run.record) });
@@ -84,6 +88,7 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
     await execute(run, settings);
   }
   async function execute(run, settings) {
+    let next = null;
     try {
       if (researchService) {
         // Persist the clarified case and extracted files before external research begins.
@@ -131,7 +136,10 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
       if (!opinions.length) throw Object.assign(new Error('사용 가능한 AI 답변이 없어 판단을 중단했습니다. 각 AI의 제외 사유와 연결 설정을 확인하세요.'), { code: 'NO_SUCCESSFUL_OPINIONS' });
       if (!getApiKey()) throw new Error('JEV_API_KEY가 설정되지 않았습니다. .env 설정 후 앱을 다시 실행하세요.');
       run.record.status = 'evaluating'; emit(run);
+      const prep = run.record.preparation;
+      const answered = [...(prep?.answeredQuestions || []), ...(prep?.questions || [])].map(item => ({ question: item.question, answer: run.record.answers?.[item.id] || '' }));
       run.record.evaluation = await evaluate({ question: run.record.question, opinions, apiKey: getApiKey(), model: settings.model, signal: run.controller.signal,
+        gateLevel: settings.gateLevel, readiness: prep?.readiness, answered,
         cwd, timeoutMs: settings.timeoutMs, researchContext: run.record.research?.context, researchSources: run.record.research?.sources,
         onProgress: progress => {
           if (run.controller.signal.aborted || typeof progress?.stage !== 'string') return;
@@ -144,6 +152,30 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
       run.record.status = opinions.length === providers.length && run.record.evaluation?.synthesis?.status !== 'error' &&
         !['not-passed', 'error'].includes(run.record.evaluation?.synthesis?.finalReview?.status) &&
         !run.record.evaluation?.refinement?.reviews?.some(review => review.status === 'error') && (!run.record.research || run.record.research.status === 'complete') ? 'complete' : 'partial';
+      // An unconfirmed report is never final: ask the user, research again, or end as inconclusive.
+      const gate = run.record.evaluation?.gate;
+      if (gate && !gate.passed) {
+        const missing = run.record.evaluation.synthesis?.missing;
+        const cycles = run.record.confidenceCycles || 0;
+        // Without a gap analysis the cycle still re-researches and debates once more.
+        if (researchService && prep && cycles < MAX_CONFIDENCE_CYCLES) {
+          run.record.confidenceCycles = cycles + 1;
+          run.record.previousCycles = [...(run.record.previousCycles || []), { cycle: cycles + 1, gate, missing, verdict: run.record.evaluation.verdict, qualityAverage: run.record.evaluation.qualityAverage }].slice(-3);
+          prep.gapSearches = [...(prep.gapSearches || []), ...(missing?.researchQueries || [])].slice(-16);
+          run.record.evaluation = null;
+          run.record.research = null;
+          run.record.opinions = providers.map(p => ({ providerId: p.id, name: p.name, status: 'pending' }));
+          if (missing?.userQuestions?.length) {
+            prep.answeredQuestions = [...(prep.answeredQuestions || []), ...(prep.questions || [])];
+            prep.questions = missing.userQuestions.map((item, index) => ({ id: `c${cycles + 1}q${index + 1}`, question: item.question, why: item.why, material: '', required: true, choice: 'CONFIDENCE_GAP' }));
+            run.record.status = 'awaiting_input';
+            next = 'ask';
+          } else {
+            run.record.status = 'researching';
+            next = 'research';
+          }
+        } else run.record.status = 'inconclusive';
+      }
     } catch (error) {
       run.record.status = run.controller.signal.aborted ? 'canceled' : 'failed';
       if (!run.controller.signal.aborted) {
@@ -151,11 +183,19 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
         if (typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(error.code)) run.record.errorCode = error.code;
       }
     } finally {
-      run.record.completedAt = new Date().toISOString();
-      try { await store.saveRecord(run.record); } catch { run.record.saveError = '기록 저장에 실패했습니다. 앱을 닫기 전에 결과를 복사하세요.'; }
-      if (current === run) current = null;
-      emit(run, 'complete');
+      if (next === null || run.controller.signal.aborted) {
+        if (next && run.controller.signal.aborted) run.record.status = 'canceled';
+        next = null;
+        run.record.completedAt = new Date().toISOString();
+        try { await store.saveRecord(run.record); } catch { run.record.saveError = '기록 저장에 실패했습니다. 앱을 닫기 전에 결과를 복사하세요.'; }
+        if (current === run) current = null;
+        emit(run, 'complete');
+      }
     }
+    if (next === 'ask') {
+      try { await store.saveRecord(run.record); } catch { run.record.saveError = '기록 저장에 실패했습니다.'; }
+      if (!run.controller.signal.aborted) emit(run, 'awaiting_input');
+    } else if (next === 'research') await execute(run, settings);
   }
   return {
     start({ question, attachments = [] }, settings) {

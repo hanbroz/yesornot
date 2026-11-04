@@ -462,3 +462,12 @@ dialog::backdrop{background:rgba(20,23,31,.4);backdrop-filter:blur(2px)}
 .lean-no{justify-content:flex-end;background:var(--no, #c2410c)}
 .verdict-probabilities .distribution-label{flex-basis:100%}
 .model-icon.ego-mark{background:#111827;color:#fff;font-weight:800}
+.gate-box{margin:14px 0;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:#fff;word-break:keep-all}
+.gate-box h6{margin:0 0 4px;font-size:14px}
+.gate-box.is-passed h6{color:var(--ok)}
+.gate-box.is-failed h6{color:var(--no)}
+.gate-checks{margin:8px 0 0;padding-left:4px;list-style:none;font-size:13px;line-height:1.8}
+.gate-checks li.is-passed{color:var(--ok)}
+.gate-checks li.is-failed{color:var(--no);font-weight:600}
+.synthesis-withheld #synthesis-title{color:var(--no)}
+.gate-level-help{margin-top:8px}

@@ -8,7 +8,7 @@ const PROVIDERS = [
   { id: 'gemini', name: 'Gemini', symbol: '✦', css: 'gemini-avatar', color: 'gemini-color' }
 ];
 const SOURCE_KINDS = { site: '대상 사이트(직접 확인)', official: '공식 자료', paper: '논문·연구', news: '뉴스', counter: '반대 근거', community: '커뮤니티', github: 'GitHub' };
-const STATUS = { preparing: '사전 검토 중', awaiting_input: '추가 답변 대기', researching: '자료 조사 중', running: '의견 수집 중', evaluating: 'JEV 평가 중', complete: '평가 완료', partial: '평가 완료 · 일부 한계 있음', failed: '실행 실패', canceled: '취소됨' };
+const STATUS = { inconclusive: '판단 불가 · 확정 기준 미달', preparing: '사전 검토 중', awaiting_input: '추가 답변 대기', researching: '자료 조사 중', running: '의견 수집 중', evaluating: 'JEV 평가 중', complete: '평가 완료', partial: '평가 완료 · 일부 한계 있음', failed: '실행 실패', canceled: '취소됨' };
 const SAMPLES = {
   launch: '새로운 서비스를 완성 전에 먼저 공개해도 될까요? 핵심 기능은 동작하며, 소규모 사용자에게 베타로 공개하려고 합니다.',
   desktop: '작은 팀의 첫 제품을 데스크톱 앱으로 출시해도 될까요? 로컬 CLI 연동이 핵심이며, 우선 Windows 사용자를 대상으로 합니다.',
@@ -139,7 +139,7 @@ function updateRunActivity() {
     title = 'AI가 수집한 근거를 바탕으로 토론하고 있습니다.';
     detail = (viewed?.opinions || []).filter(item => ['success', 'error', 'canceled'].includes(item.status)).length + '/3개 AI 처리 완료 · 상세 진행은 아래 토론 카드에서 확인할 수 있습니다.';
   } else if (status === 'evaluating') {
-    title = { 'model-reviewing': '각 AI가 JEV 판정을 재검증하고 있습니다.', 'jev-refining': 'JEV가 보완된 의견을 재평가하고 있습니다.', synthesizing: '최종 실행안을 작성하고 있습니다.', 'final-review': '독립 AI가 최종 보고서의 적합성을 검토하고 있습니다.' }[viewed?.evaluationStage] || 'JEV가 AI 의견을 평가하고 있습니다.';
+    title = { 'quality-revising': '기준 미달 답변을 감점 사유와 함께 다시 쓰게 하고 있습니다.', 'verdict-sampling': 'JEV 판정을 5번 독립 측정하고 있습니다.', 'model-reviewing': '각 AI가 JEV 판정을 재검증하고 있습니다.', 'jev-refining': 'JEV가 보완된 의견을 재평가하고 있습니다.', synthesizing: '최종 실행안을 작성하고 있습니다.', 'final-review': '독립 AI가 최종 보고서의 적합성을 검토하고 있습니다.' }[viewed?.evaluationStage] || 'JEV가 AI 의견을 평가하고 있습니다.';
     detail = '검토가 완료되면 다음 단계로 진행합니다.';
   }
   // Keep elapsed ticks outside the live region so screen readers announce only real stage changes.
@@ -301,11 +301,58 @@ function probabilityEntries(probabilities) {
   if (Array.isArray(probabilities)) return probabilities.map((value, index) => Array.isArray(value) ? value : [value?.choice || value?.label || String(index), typeof value === 'number' ? value : value?.probability]);
   return probabilities && typeof probabilities === 'object' ? Object.entries(probabilities) : [];
 }
+function gateBox(gate, interval) {
+  const box = element('section', 'gate-box' + (gate.passed ? ' is-passed' : ' is-failed'));
+  box.append(element('h6', '', (gate.passed ? '확정 기준 통과' : '확정 기준 미달') + ' · ' + gate.label));
+  if (interval) box.append(element('p', 'detail-meta', choiceLabel(interval.choice) + ' 확률 ' + percent(interval.mean) + ' · 95% 신뢰구간 ' + percent(interval.lower) + '~' + percent(interval.upper) + ' (' + interval.n + '회 독립 측정)'));
+  const list = element('ul', 'gate-checks');
+  for (const check of gate.checks || []) {
+    const value = check.value === null || check.value === undefined ? '측정 안 됨' : check.id === 'interval' ? percent(check.value) : check.value + (check.id === 'readiness' ? '%' : '점');
+    const target = check.id === 'interval' ? percent(check.target) : check.target + (check.id === 'readiness' ? '%' : '점');
+    list.append(element('li', check.passed ? 'is-passed' : 'is-failed', (check.passed ? '✓ ' : '✗ ') + check.label + ': ' + value + ' (기준 ' + target + ' 이상)'));
+  }
+  box.append(list);
+  return box;
+}
+function renderWithheld(record) {
+  const synthesis = record.evaluation.synthesis;
+  const gate = record.evaluation.gate;
+  $('synthesis-panel').hidden = false;
+  $('synthesis-panel').classList.remove('synthesis-error');
+  $('synthesis-panel').classList.add('synthesis-withheld');
+  $('synthesis-meta').textContent = '확정되지 않음 · 이 결과를 결론으로 쓰지 마세요';
+  $('synthesis-title').textContent = record.status === 'inconclusive' ? '판단 불가: 신뢰할 수 있는 결론을 만들지 못했습니다.' : '확정 기준에 못 미쳐 추가 확인을 진행합니다.';
+  const body = $('synthesis-text');
+  body.replaceChildren();
+  if (gate) body.append(gateBox(gate, record.evaluation.verdict?.interval));
+  const missing = synthesis.missing;
+  if (missing?.summary) body.append(element('p', '', missing.summary));
+  if (missing?.userQuestions?.length) {
+    body.append(element('h6', '', '사용자에게 확인이 필요한 정보'));
+    const list = element('ul', 'research-agent-list');
+    for (const item of missing.userQuestions) list.append(element('li', '', item.question + (item.why ? ' — ' + item.why : '')));
+    body.append(list);
+  }
+  if (missing?.researchQueries?.length) {
+    body.append(element('h6', '', '추가로 조사해야 할 자료'));
+    const list = element('ul', 'research-agent-list');
+    for (const item of missing.researchQueries) list.append(element('li', '', item.query + (item.purpose ? ' — ' + item.purpose : '')));
+    body.append(list);
+  }
+  if (synthesis.draft?.text) {
+    const draft = element('details', 'research-details');
+    draft.append(element('summary', '', '확정되지 않은 초안 보기 (결론으로 쓰지 마세요)'), element('p', 'research-report', synthesis.draft.text));
+    body.append(draft);
+  }
+  $('synthesis-point').hidden = true;
+}
 function renderSynthesis(record) {
   const synthesis = record.evaluation?.synthesis;
   const pending = record.status === 'evaluating' && ['synthesizing', 'final-review'].includes(record.evaluationStage);
   const complete = synthesis?.status === 'complete';
   const failed = synthesis?.status === 'error';
+  if (synthesis?.status === 'withheld') { renderWithheld(record); return; }
+  $('synthesis-panel').classList.remove('synthesis-withheld');
   $('synthesis-panel').hidden = !pending && !complete && !failed;
   $('synthesis-panel').classList.toggle('synthesis-error', failed);
   $('synthesis-title').textContent = complete ? synthesis.title : pending ? '최종 의견을 종합하고 있어요.' : failed ? '최종 의견을 종합하지 못했습니다.' : '';
@@ -320,6 +367,7 @@ function renderSynthesis(record) {
       reportBody.append(block);
     }
   } else reportBody.textContent = complete ? synthesis.text : pending ? 'JEV 평가를 반영해 최종 의견을 종합하고 있어요.' : failed ? (synthesis.error || '최종 종합 요청에 실패했습니다. 수집된 의견과 JEV 평가는 개별 AI 카드에서 확인할 수 있습니다.') : '';
+  if (complete && record.evaluation?.gate) reportBody.append(gateBox(record.evaluation.gate, record.evaluation.verdict?.interval));
   const review = complete && synthesis.finalReview;
   if (review && Array.isArray(review.rounds)) {
     const box = element('section', 'final-review' + (review.status === 'passed' ? ' is-passed' : ' is-warn'));
@@ -861,7 +909,7 @@ function renderRecord(record) {
   $('results-content').hidden = beforeDebate;
   $('empty-result').hidden = true;
   $('result-badge').textContent = STATUS[record.status] || record.status;
-  const stageLabels = { 'final-review': '독립 AI가 최종 보고서가 결론으로 적합한지 검토하고 있어요.', 'model-reviewing': '각 AI가 JEV 판정을 재검증하고 있어요.', 'jev-refining': 'JEV가 보완된 의견을 재평가하고 있어요.', synthesizing: '최종 실행안을 작성하고 있어요.' };
+  const stageLabels = { 'quality-revising': '기준 미달 답변에 JEV 감점 사유를 붙여 다시 쓰게 하고 있어요.', 'verdict-sampling': 'JEV 판정을 5번 독립적으로 측정해 신뢰구간을 계산하고 있어요.', 'final-review': '독립 AI가 최종 보고서가 결론으로 적합한지 검토하고 있어요.', 'model-reviewing': '각 AI가 JEV 판정을 재검증하고 있어요.', 'jev-refining': 'JEV가 보완된 의견을 재평가하고 있어요.', synthesizing: '최종 실행안을 작성하고 있어요.' };
   $('run-status').textContent = [record.status === 'evaluating' ? stageLabels[record.evaluationStage] || 'JEV 중간 판정 중' : STATUS[record.status] || record.status, beforeDebate ? '' : successful + '/3개 응답', timeLabel(record.createdAt)].filter(Boolean).join(' · ');
   const currentStep = record.status === 'running' ? 0 : record.evaluationStage === 'model-reviewing' ? 2 : record.evaluationStage === 'jev-refining' ? 3 : ['synthesizing', 'final-review'].includes(record.evaluationStage) ? 4 : 1;
   const completedSteps = [successful > 0 && record.status !== 'running', Boolean(evaluation || (!isTerminal && currentStep > 1)), Boolean(evaluation?.refinement?.reviews?.some((review) => review.status === 'complete') || (!isTerminal && currentStep > 2)), Boolean(evaluation?.refinement?.reviewedEvaluation || (!isTerminal && currentStep > 3)), evaluation?.synthesis?.status === 'complete'];
@@ -873,10 +921,12 @@ function renderRecord(record) {
   if (beforeDebate) ['step-question', 'step-opinions', 'step-jev', 'step-refine', 'step-final'].forEach((id) => { $(id).className = 'process-step'; });
   $('opinion-grid').replaceChildren(...(beforeDebate ? [] : PROVIDERS.map((provider) => renderOpinion(record, provider))));
   $('verdict-heading').textContent = evaluation?.refinement?.reviewedEvaluation ? 'JEV 재평가와 최종 실행안' : record.status === 'evaluating' ? 'JEV 판정과 AI 재검증' : 'JEV 평가와 최종 의견';
-  $('verdict-label').textContent = verdict ? choiceLabel(verdict.choice) : '—';
-  $('verdict-label').className = 'verdict-word' + (verdict?.choice === 'NO' ? ' verdict-no' : verdict?.choice === 'HOLD' || verdict?.choice === 'CONDITIONAL' ? ' verdict-hold' : '');
+  // An unconfirmed lean must never look like a conclusion.
+  const unconfirmed = !!evaluation?.gate && !evaluation.gate.passed;
+  $('verdict-label').textContent = unconfirmed ? '판단 불가' : verdict ? choiceLabel(verdict.choice) : '—';
+  $('verdict-label').className = 'verdict-word' + (unconfirmed ? ' verdict-hold' : verdict?.choice === 'NO' ? ' verdict-no' : verdict?.choice === 'HOLD' || verdict?.choice === 'CONDITIONAL' ? ' verdict-hold' : '');
   const lean = leanOf(verdict);
-  $('verdict-title').textContent = verdict ? verdict.choice === 'YES' ? (lean ? '실행하는 쪽이 더 나은 선택입니다 · ' + lean.strength : '질문의 실행을 권고합니다.') : verdict.choice === 'NO' ? (lean ? '실행하지 않는 쪽이 더 나은 선택입니다 · ' + lean.strength : '질문의 실행을 권고하지 않습니다.') : verdict.choice === 'CONDITIONAL' ? '조건을 충족하는 실행안을 권고합니다.' : '추가 확인 후 결정하세요.' : record.status === 'evaluating' ? '답변 품질과 판단을 평가하고 있어요.' : isTerminal ? '최종 판단이 없습니다.' : '세 AI의 답변을 기다리고 있어요.';
+  $('verdict-title').textContent = unconfirmed ? (record.status === 'inconclusive' ? '확정 기준을 통과하지 못했습니다. 아래 기울기를 결론으로 쓰지 마세요.' : '확정 기준 미달로 추가 확인을 진행합니다.') : verdict ? verdict.choice === 'YES' ? (lean ? '실행하는 쪽이 더 나은 선택입니다 · ' + lean.strength : '질문의 실행을 권고합니다.') : verdict.choice === 'NO' ? (lean ? '실행하지 않는 쪽이 더 나은 선택입니다 · ' + lean.strength : '질문의 실행을 권고하지 않습니다.') : verdict.choice === 'CONDITIONAL' ? '조건을 충족하는 실행안을 권고합니다.' : '추가 확인 후 결정하세요.' : record.status === 'evaluating' ? '답변 품질과 판단을 평가하고 있어요.' : isTerminal ? '최종 판단이 없습니다.' : '세 AI의 답변을 기다리고 있어요.';
   let description = '';
   if (verdict) {
     const reasons = [];
@@ -886,7 +936,8 @@ function renderRecord(record) {
     if (verdict.gateApplied && !reasons.length) reasons.push('앱의 보류 기준이 적용되었습니다.');
     if (verdict.gateApplied && verdict.rawChoice) reasons.push('JEV 원래 판정: ' + choiceLabel(verdict.rawChoice) + '.');
     if (!reasons.length && !lean) reasons.push('원래 질문과 수집한 의견에 대한 JEV의 별도 Choice 평가입니다.');
-    if (lean) reasons.push('JEV가 모든 AI 의견과 조사 근거를 종합해 각 선택이 더 나은 결정일 확률을 추정했습니다. 50%를 넘는 쪽을 권고합니다. AI 모델의 추정치이므로 결과를 보장하지는 않습니다.');
+    if (lean && evaluation?.gate && !evaluation.gate.passed) reasons.push('JEV 판정을 여러 번 독립적으로 측정했지만 확정 기준을 통과하지 못했습니다. 아래 막대는 참고용 기울기일 뿐 권고가 아닙니다.');
+    else if (lean) reasons.push('JEV가 모든 AI 의견과 조사 근거를 종합해 각 선택이 더 나은 결정일 확률을 추정했습니다. 50%를 넘는 쪽을 권고합니다. AI 모델의 추정치이므로 결과를 보장하지는 않습니다.');
     else reasons.push('판정 confidence ' + percent(verdict.confidence) + ' · 이전 방식으로 저장된 결과입니다.');
     description = reasons.join(' ');
   } else if (record.error) description = record.error;
@@ -903,7 +954,7 @@ function renderRecord(record) {
     yesPart.style.flexGrow = String(Math.max(lean.yes, 0.08));
     noPart.style.flexGrow = String(Math.max(lean.no, 0.08));
     bar.append(yesPart, noPart);
-    $('verdict-probabilities').append(element('span', 'distribution-label', '더 나은 결정일 확률 (JEV 추정)'), bar);
+    $('verdict-probabilities').append(element('span', 'distribution-label', unconfirmed ? '확정되지 않은 기울기 (JEV 추정 · 결론 아님)' : '더 나은 결정일 확률 (JEV 추정)'), bar);
   } else if (verdict) {
     $('verdict-probabilities').append(element('span', 'distribution-label', 'JEV 판정 분포'));
     for (const [name, value] of probabilityEntries(verdict.probabilities)) {
@@ -913,7 +964,7 @@ function renderRecord(record) {
   $('overall-score').textContent = score(evaluation?.qualityAverage);
   $('score-bar').value = finite(evaluation?.qualityAverage) ? evaluation.qualityAverage : 0;
   $('copy-result').disabled = !bridge || !isTerminal;
-  $('export-pdf').disabled = !bridge || !isTerminal || evaluation?.synthesis?.status !== 'complete';
+  $('export-pdf').disabled = !bridge || !isTerminal || !['complete', 'withheld'].includes(evaluation?.synthesis?.status);
   $('save-state').textContent = record.saveError ? '기록 저장 실패 · 현재 화면에서 확인하세요' : isTerminal ? '이 기기에 저장된 실행 기록' : '진행 중';
   $('save-state').classList.toggle('save-error', Boolean(record.saveError));
   $('common-ground').textContent = successful + '개 의견 수집 · ' + (evaluation?.opinions?.length || 0) + '개 답변 품질 평가' + (evaluation ? ' · 평가 모델 ' + evaluation.model : '') + (record.error ? ' · ' + record.error : '') + (record.saveError ? ' · 기록 저장 실패: ' + record.saveError : '');
@@ -1129,8 +1180,20 @@ async function saveAndCheck(id) {
   }
   await checkConnection(id);
 }
+const GATE_LEVELS = {
+  strict: { label: '엄격', lowerBound: 70, minQuality: 75, avgQuality: 80 },
+  recommended: { label: '권장', lowerBound: 60, minQuality: 70, avgQuality: 75 },
+  relaxed: { label: '완화', lowerBound: 55, minQuality: 65, avgQuality: 70 },
+};
+function renderGateHelp() {
+  const rules = GATE_LEVELS[$('gate-level').value] || GATE_LEVELS.strict;
+  $('gate-level-help').textContent = '「' + rules.label + '」 기준으로 아래를 모두 통과해야 최종 보고서로 확정합니다. ① JEV 판정을 의견 순서를 바꿔 5번 독립 측정한 '
+    + '결과, 더 나은 쪽 확률의 95% 신뢰구간 아래쪽 끝이 ' + rules.lowerBound + '% 이상 ② 모든 AI 답변 품질 ' + rules.minQuality + '점 이상, 평균 ' + rules.avgQuality
+    + '점 이상(미달 답변은 JEV 감점 사유를 붙여 최대 3번 다시 쓰게 함) ③ 최종 보고서 적합성 검토 90점 이상 ④ 인터뷰 준비도 90% 이상. 미달이면 결정적인 정보를 다시 묻거나 추가 조사해 최대 2번 다시 판단하고, '
+    + '그래도 미달이면 최종 보고서 대신 「판단 불가」로 무엇이 부족한지 알려 드립니다. 기준이 엄격할수록 확정이 어렵고 시간이 더 걸립니다. 신뢰구간은 판정이 얼마나 안정적인지를 뜻하며 정답을 보장하지는 않습니다.';
+}
 function settingsPayload(patch = {}) {
-  const next = { model: settings.model, timeoutMs: settings.timeoutMs, ...(geminiModel ? { geminiModel } : {}), ...patch };
+  const next = { model: settings.model, timeoutMs: settings.timeoutMs, ...(geminiModel ? { geminiModel } : {}), gateLevel: settings.gateLevel || 'strict', ...patch };
   return next;
 }
 async function selectModel(id, value) {
@@ -1236,12 +1299,13 @@ document.addEventListener('keydown', (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); if (viewed?.status === 'awaiting_input') continueRun(); else startRun(); }
   if (event.altKey && event.key.toLowerCase() === 'n') { event.preventDefault(); newQuestion(); }
 });
+$('gate-level').addEventListener('change', renderGateHelp);
 $('settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!bridge || busy()) return;
   $('save-settings').disabled = true;
   try {
-    settings = await bridge.saveSettings(settingsPayload({ timeoutMs: Number($('cli-timeout').value) }));
+    settings = await bridge.saveSettings(settingsPayload({ timeoutMs: Number($('cli-timeout').value), gateLevel: $('gate-level').value }));
     $('connection-message').textContent = '';
     toast('설정을 저장했습니다.');
     $('connection-dialog').close();
@@ -1249,7 +1313,7 @@ $('settings-form').addEventListener('submit', async (event) => {
   finally { setControls(); }
 });
 $('export-pdf').addEventListener('click', async () => {
-  if (!bridge?.exportReportPdf || !viewed || viewed.evaluation?.synthesis?.status !== 'complete') return;
+  if (!bridge?.exportReportPdf || !viewed || !['complete', 'withheld'].includes(viewed.evaluation?.synthesis?.status)) return;
   const button = $('export-pdf');
   button.disabled = true;
   try {
@@ -1265,6 +1329,7 @@ $('copy-result').addEventListener('click', async () => {
 });
 async function initialize() {
   buildConnectionCards();
+  renderGateHelp();
   renderHistory();
   renderConnections();
   renderEmpty();
@@ -1301,6 +1366,8 @@ async function initialize() {
     settings = state.settings || settings;
     geminiModel = typeof state.geminiModel === 'string' ? state.geminiModel : geminiModel;
     $('cli-timeout').value = String(settings.timeoutMs);
+    $('gate-level').value = settings.gateLevel || 'strict';
+    renderGateHelp();
     if (state.warning) {
       $('environment-notice').hidden = false;
       $('environment-notice').textContent = state.warning;

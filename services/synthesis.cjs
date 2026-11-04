@@ -1,6 +1,7 @@
 'use strict';
 
 const { FINAL_REPORT_INSTRUCTIONS, validateDecisionReport } = require('./decision-report.cjs');
+const { gateLevel, verdictInterval, evaluateGate, VERDICT_SAMPLES } = require('./confidence.cjs');
 
 const PROVIDER_ORDER = ['claude', 'codex', 'gemini'];
 const PROVIDER_NAMES = { claude: 'Claude', codex: 'ChatGPT', gemini: 'Gemini' };
@@ -12,6 +13,14 @@ const FINAL_REVIEW_SCHEMA = { type: 'object', additionalProperties: false, requi
   score: { type: 'integer', minimum: 0, maximum: 100 }, suitable: { type: 'boolean' },
   issues: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 600 } },
   strengths: { type: 'array', maxItems: 5, items: { type: 'string', maxLength: 400 } },
+} };
+// Answers below the chosen quality bar are revised with JEV's per-dimension reasons.
+const MAX_QUALITY_ROUNDS = 3;
+// When the report cannot be confirmed, the AIs name the information that would settle it.
+const GAP_SCHEMA = { type: 'object', additionalProperties: false, required: ['summary', 'userQuestions', 'researchQueries'], properties: {
+  summary: { type: 'string', maxLength: 2000 },
+  userQuestions: { type: 'array', maxItems: 5, items: { type: 'object', additionalProperties: false, required: ['question', 'why'], properties: { question: { type: 'string', maxLength: 400 }, why: { type: 'string', maxLength: 800 } } } },
+  researchQueries: { type: 'array', maxItems: 8, items: { type: 'object', additionalProperties: false, required: ['query', 'purpose', 'kind'], properties: { query: { type: 'string', maxLength: 300 }, purpose: { type: 'string', maxLength: 600 }, kind: { type: 'string', enum: ['official', 'news', 'paper', 'counter', 'community', 'github'] } } } },
 } };
 const SAFE_ERROR_CODES = new Set(['AUTH_REQUIRED', 'NOT_INSTALLED', 'CLI_NOT_FOUND', 'RATE_LIMIT', 'TIMEOUT', 'INVALID_RESPONSE', 'INVALID_API_KEY', 'NETWORK_ERROR', 'UNAVAILABLE', 'AUTH_ERROR', 'INVALID_CITATIONS', 'INCOMPLETE_REPORT']);
 
@@ -158,6 +167,44 @@ function validateFinalReview(value) {
   return { score: data.score, suitable: data.suitable, issues: data.issues.map(item => clipContext(item.trim(), 600)).filter(Boolean).slice(0, 8), strengths: data.strengths.map(item => clipContext(item.trim(), 400)).filter(Boolean).slice(0, 5) };
 }
 
+// Comments name each weak rubric dimension, the level reached and the level to reach.
+function qualityComments(score, feedback) {
+  return [...(score?.dimensions || [])].sort((a, b) => a.points / a.weight - b.points / b.weight).map(dimension => {
+    const reached = dimension.legend?.[String(Math.round(dimension.rawScore))];
+    const next = dimension.legend?.[String(Math.min(dimension.maxScore, Math.floor(dimension.rawScore) + 1))];
+    return `${dimension.name}: ${dimension.points}/${dimension.weight}점. 현재 수준: ${reached || '미상'} 다음 수준에 필요한 것: ${next || '최고 수준 유지'}`;
+  }).concat(feedback?.label ? [`JEV가 가장 먼저 고치라고 한 영역: ${feedback.label}`] : []);
+}
+function qualityPrompt(question, opinion, score, feedback, rules, researchContext, peers) {
+  return budgetPrompt([
+    '당신의 답변이 JEV 품질 평가에서 기준에 못 미쳤습니다. 아래 감점 사유를 하나씩 해결해 답변 전체를 다시 쓰세요.',
+    SAFETY,
+    `현재 점수는 ${score?.total ?? '미상'}점이고 기준은 답변별 ${rules.minQuality}점, 평균 ${rules.avgQuality}점입니다. qualityComments의 각 항목에서 '다음 수준에 필요한 것'을 실제 내용으로 채우세요. 점수를 올리려고 확인되지 않은 사실을 만들지 마세요. 근거가 없으면 없다고 밝히고 어떤 자료가 필요한지 쓰세요.`,
+    'researchContext의 실제 출처를 [S번호]로 인용하고, 다른 AI 의견의 타당한 근거와 반론을 반영하세요. 원래 답변을 그대로 복사하지 마세요.',
+    '실행하는 쪽이 조금이라도 더 나으면 YES, 아니면 NO를 고르세요. 결론이 바뀌는 조건은 본문에 쓰세요.',
+    FORMAT,
+  ], { phase: 'quality-revision', question, researchContext, yourAnswer: plainOpinion(opinion), qualityComments: qualityComments(score, feedback), otherOpinions: peers.map(plainOpinion) });
+}
+function gapPrompt(question, opinions, gate, interval, researchContext, answered) {
+  return budgetPrompt([
+    '이 판단은 확정 기준을 통과하지 못해 최종 보고서로 낼 수 없습니다. 결론을 확정하는 데 결정적으로 부족한 정보를 정리하세요.',
+    SAFETY,
+    'userQuestions에는 사용자 본인만 답할 수 있는 결정적 정보만 한 질문에 하나씩 쓰세요. 이미 답한 질문(answered)은 다시 묻지 마세요. researchQueries에는 공개 자료로 확인할 수 있는 결정적 사실을 찾을 검색어를 쓰고, 개인 정보는 넣지 마세요. summary에는 왜 지금 결론을 믿을 수 없는지와 무엇이 확인되면 판단할 수 있는지를 한국어로 쓰세요.',
+    'JSON 객체 하나만 출력하세요.',
+  ], { phase: 'gap-analysis', question, researchContext, gate, verdictInterval: interval, opinions: opinions.map(plainOpinion), answered });
+}
+function validateGap(value) {
+  const data = value?.data;
+  if (!data || typeof data.summary !== 'string' || !Array.isArray(data.userQuestions) || !Array.isArray(data.researchQueries)) throw failure('INVALID_RESPONSE', '부족한 정보 분석 응답을 확인할 수 없습니다.');
+  const text = (item, limit) => typeof item === 'string' ? item.trim().slice(0, limit) : '';
+  return {
+    summary: text(data.summary, 2000),
+    userQuestions: data.userQuestions.map(item => ({ question: text(item?.question, 400), why: text(item?.why, 800) })).filter(item => item.question).slice(0, 5),
+    researchQueries: data.researchQueries.map(item => ({ query: text(item?.query, 300), purpose: text(item?.purpose, 600), kind: ['official', 'news', 'paper', 'counter', 'community', 'github'].includes(item?.kind) ? item.kind : 'official' })).filter(item => item.query).slice(0, 8),
+  };
+}
+function average(rows) { return rows.length ? Math.round(rows.reduce((sum, row) => sum + row.total, 0) / rows.length * 100) / 100 : null; }
+
 function validateOpinion(opinion, { stance, rejectCopies = [] } = {}) {
   if (!opinion || opinion.status !== 'success' || !CHOICES.includes(opinion.stance) || (stance && opinion.stance !== stance) ||
       [['title', 500], ['text', 30000], ['point', 5000]].some(([key, limit]) =>
@@ -188,7 +235,7 @@ function combinedUsage(initial, refined) {
   };
 }
 
-function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
+function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured, judgeVerdict }) {
   if (typeof evaluate !== 'function' || typeof getOpinion !== 'function') throw new TypeError('evaluate and getOpinion are required');
   return async function evaluateAndSynthesize(options) {
     const { question, signal, cwd, timeoutMs = 180000, onProgress } = options;
@@ -199,6 +246,11 @@ function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
     const emit = progress => { if (!signal?.aborted) onProgress?.(structuredClone(progress)); };
     const sourceProviderIds = sources.map(source => source.providerId);
     const started = Date.now();
+    // Confirmation gate: only when the verdict sampler is available (the app always supplies it).
+    const gated = typeof judgeVerdict === 'function' && typeof getStructured === 'function';
+    const rules = gateLevel(options.gateLevel);
+    // A gated run that produced no confirmed report is never presented as a conclusion.
+    const noReportGate = () => ({ level: rules.id, label: rules.label, passed: false, checks: [] });
     const inference = async (providerId, prompt) => {
       const controller = new AbortController();
       const abort = () => controller.abort(canceled());
@@ -208,13 +260,13 @@ function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
       try { return await withAbort(() => getOpinion(providerId, question, { cwd, signal: controller.signal, timeoutMs, prompt }), controller.signal); }
       finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
     };
-    const structured = async (providerId, prompt) => {
+    const structured = async (providerId, prompt, schema = FINAL_REVIEW_SCHEMA) => {
       const controller = new AbortController();
       const abort = () => controller.abort(canceled());
       if (signal?.aborted) throw canceled();
       signal?.addEventListener('abort', abort, { once: true });
       const timer = setTimeout(() => controller.abort(failure('TIMEOUT', '최종 보고서 검토 시간을 초과했습니다.')), timeoutMs);
-      try { return await withAbort(() => getStructured(providerId, prompt, FINAL_REVIEW_SCHEMA, { cwd, signal: controller.signal, timeoutMs, research: false }), controller.signal); }
+      try { return await withAbort(() => getStructured(providerId, prompt, schema, { cwd, signal: controller.signal, timeoutMs, research: false }), controller.signal); }
       finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
     };
     const evaluatePhase = async (phase, opinions, reviewContext) => {
@@ -234,7 +286,7 @@ function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
       refinement.status = 'error'; refinement.elapsedMs = Date.now() - started; refinement.error = message;
       if (errorCode) refinement.errorCode = errorCode;
       emit({ stage: 'complete', synthesisStatus: 'error' });
-      return { ...initial, refinement, synthesis: { version: 2, status: 'error', error: message, sourceProviderIds, attempts: [], elapsedMs: Date.now() - started } };
+      return { ...initial, refinement, ...(gated ? { gate: noReportGate() } : {}), synthesis: { version: 2, status: 'error', error: message, sourceProviderIds, attempts: [], elapsedMs: Date.now() - started } };
     };
     emitReviews();
     await Promise.all(reviews.map(async (row, index) => {
@@ -250,7 +302,7 @@ function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
       emitReviews();
     }));
     if (signal?.aborted) throw canceled();
-    const verified = reviews.filter(row => row.status === 'complete').map(row => ({ ...plainOpinion(row), status: 'success' }));
+    let verified = reviews.filter(row => row.status === 'complete').map(row => ({ ...plainOpinion(row), status: 'success' }));
     if (!verified.length) return failedResult('모든 AI의 검증·수정에 실패하여 최종 의견을 작성하지 못했습니다. 초기 평가와 각 오류를 확인하고 다시 시도해 주세요.');
     let refined;
     try {
@@ -259,10 +311,73 @@ function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
       if (isCanceled(error, signal)) throw canceled();
       return failedResult('검증·수정 의견의 JEV 재평가에 실패하여 최종 의견을 작성하지 못했습니다. 초기 평가와 검증 의견을 확인한 후 다시 시도해 주세요.', safeCode(error));
     }
+    const reviewContext = { originalQuestion: question, originalOpinions: sources.map(plainOpinion), initialEvaluation: initial };
+    const qualityRounds = [];
+    for (let round = 1; gated && round <= MAX_QUALITY_ROUNDS; round++) {
+      const mean = average(refined.opinions);
+      const weak = refined.opinions.filter(row => row.total < rules.minQuality || (mean < rules.avgQuality && row.total < rules.avgQuality));
+      if (!weak.length) break;
+      emit({ stage: 'quality-revising', round, providerIds: weak.map(row => row.providerId) });
+      const revised = await Promise.all(weak.map(async row => {
+        const current = verified.find(item => item.providerId === row.providerId);
+        try {
+          const response = await inference(row.providerId, qualityPrompt(question, current, row, refined.feedback?.find(item => item.providerId === row.providerId), rules, options.researchContext, verified.filter(item => item !== current)));
+          if (signal?.aborted) throw canceled();
+          return { ...validateOpinion(response, { rejectCopies: [current] }), providerId: row.providerId, status: 'success' };
+        } catch (error) {
+          if (isCanceled(error, signal)) throw canceled();
+          return null;
+        }
+      }));
+      qualityRounds.push({ round, scores: refined.opinions.map(row => ({ providerId: row.providerId, total: row.total })), revised: revised.filter(Boolean).map(item => item.providerId),
+        comments: Object.fromEntries(weak.map(row => [row.providerId, qualityComments(row, refined.feedback?.find(item => item.providerId === row.providerId))])) });
+      if (!revised.some(Boolean)) break;
+      const candidate = verified.map(item => revised.find(next => next?.providerId === item.providerId) || item);
+      try { refined = await evaluatePhase('refined', candidate, reviewContext); verified = candidate; }
+      catch (error) { if (isCanceled(error, signal)) throw canceled(); break; }
+    }
+    // Independent YES/NO judgments with the opinions in different orders; their spread gives the interval.
+    let interval = null, verdictSamples = [];
+    if (gated) {
+      emit({ stage: 'verdict-sampling', samples: VERDICT_SAMPLES });
+      const orders = Array.from({ length: VERDICT_SAMPLES }, (_, index) => {
+        const rotation = verified.map((_, position) => (position + Math.floor(index / 2)) % verified.length);
+        return index % 2 ? rotation.reverse() : rotation;
+      });
+      verdictSamples = await Promise.all(orders.map(async order => {
+        try { return await withAbort(() => judgeVerdict({ question, opinions: verified, order, apiKey: options.apiKey, model: options.model, signal, timeoutMs, researchContext: options.researchContext }), signal); }
+        catch (error) { if (isCanceled(error, signal)) throw canceled(); return { error: safeCode(error) }; }
+      }));
+      interval = verdictInterval(verdictSamples.filter(sample => sample?.probabilities).map(sample => sample.probabilities.YES));
+      if (interval) {
+        const yes = interval.choice === 'YES' ? interval.mean : Math.round((1 - interval.mean) * 1000) / 1000;
+        refined = { ...refined, verdict: { ...refined.verdict, rawChoice: refined.verdict.choice, choice: interval.choice,
+          probabilities: { YES: yes, NO: Math.round((1 - yes) * 1000) / 1000 }, confidence: Math.abs(2 * yes - 1), interval } };
+      }
+    }
     refinement.status = 'complete'; refinement.reviewedEvaluation = refined; refinement.elapsedMs = Date.now() - started;
-    const evaluation = { ...refined, opinions: initial.opinions, qualityAverage: initial.qualityAverage, feedback: initial.feedback, usage: combinedUsage(initial, refined), refinement };
+    const evaluation = { ...refined, opinions: gated ? refined.opinions : initial.opinions, qualityAverage: gated ? average(refined.opinions) : initial.qualityAverage,
+      initialQualityAverage: initial.qualityAverage, feedback: initial.feedback, usage: combinedUsage(initial, refined), refinement,
+      ...(gated ? { revisedOpinions: verified.map(plainOpinion) } : {}),
+      ...(gated ? { qualityRounds, verdictSamples: verdictSamples.map(sample => sample?.probabilities ? { YES: sample.probabilities.YES, choice: sample.choice } : { error: sample?.error }) } : {}) };
+    const gateFor = (reviewScore, reviewPassed) => evaluateGate({ level: rules.id, interval, opinionScores: refined.opinions, reviewScore, reviewPassed, readiness: options.readiness });
+    // A failed gate never ships a report as final; the AIs name what is missing instead.
+    const withhold = async (gate, base = {}) => {
+      let missing = null;
+      for (const providerId of PROVIDER_ORDER.filter(id => verified.some(item => item.providerId === id))) {
+        try { missing = validateGap(await structured(providerId, gapPrompt(question, verified, gate, interval, options.researchContext, options.answered || []), GAP_SCHEMA)); break; }
+        catch (error) { if (isCanceled(error, signal)) throw canceled(); }
+      }
+      emit({ stage: 'complete', synthesisStatus: base.status || 'withheld' });
+      return { ...evaluation, gate, synthesis: { version: 2, status: 'withheld', sourceProviderIds, elapsedMs: Date.now() - started, ...base, confirmed: false, missing, ...(missing ? {} : { missingError: '부족한 정보를 분석하지 못했습니다.' }) } };
+    };
+    if (gated) {
+      const preGate = gateFor(rules.review);
+      if (!preGate.passed) return withhold(gateFor(null));
+    }
     const attempts = [];
-    const prompt = finalPrompt(question, sources, reviews, initial, refined, options.researchContext, options.researchSources);
+    const finalReviews = reviews.map(row => { const current = verified.find(item => item.providerId === row.providerId); return row.status === 'complete' && current ? { ...row, ...plainOpinion(current) } : row; });
+    const prompt = finalPrompt(question, sources, finalReviews, initial, refined, options.researchContext, options.researchSources);
     const verifiedIds = verified.map(source => source.providerId);
     for (const providerId of PROVIDER_ORDER.filter(id => verifiedIds.includes(id))) {
       let repair;
@@ -291,7 +406,7 @@ function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
             emit({ stage: 'synthesizing', providerId: writerId, sourceProviderIds, attempt: attempts.length + 1, repairing: true });
             try {
               const issues = done.flatMap(row => row.issues.map(issue => `${PROVIDER_NAMES[row.providerId] || row.providerId} 검토: ${issue}`)).slice(0, 12);
-              const response = await inference(writerId, finalPrompt(question, sources, reviews, initial, refined, options.researchContext, options.researchSources,
+              const response = await inference(writerId, finalPrompt(question, sources, finalReviews, initial, refined, options.researchContext, options.researchSources,
                 { issues: issues.length ? issues : ['독립 검토 점수가 기준에 미달했습니다. 종합성·인용·실행 조건을 보완하세요.'], previousDraft: { stance: draft.stance, text: clipContext(draft.text, 6000), point: clipContext(draft.point, 1500) } }));
               if (signal?.aborted) throw canceled();
               const revised = validateOpinion(response, { stance: refined.verdict.choice, rejectCopies: sources.concat(verified) });
@@ -309,7 +424,7 @@ function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
         // One content repair per writer. Transport, stance, copy and citation
         // failures retain the existing provider fallback path.
         for (let pass = 0; pass < 2; pass++) {
-          const writingPrompt = repair ? finalPrompt(question, sources, reviews, initial, refined, options.researchContext, options.researchSources, repair) : prompt;
+          const writingPrompt = repair ? finalPrompt(question, sources, finalReviews, initial, refined, options.researchContext, options.researchSources, repair) : prompt;
           const response = await inference(providerId, writingPrompt);
           if (signal?.aborted) throw canceled();
           result = validateOpinion(response, { stance: refined.verdict.choice, rejectCopies: sources.concat(verified) });
@@ -327,6 +442,15 @@ function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
         if (typeof getStructured === 'function') result = await reviewFinalReport(result, providerId, verifiedIds);
         attempts.push({ providerId, status: 'complete', ...(repair ? { repairCount: 1 } : {}) });
         const synthesis = { version: 2, status: 'complete', ...result, providerId, sourceProviderIds, elapsedMs: Date.now() - started, attempts };
+        if (gated) {
+          const gate = gateFor(result.finalReview?.score ?? null, result.finalReview?.status === 'passed');
+          if (!gate.passed || result.finalReview?.status !== 'passed') {
+            const withheld = await withhold(gate.passed ? { ...gate, passed: false } : gate, { draft: { stance: result.stance, title: result.title, text: result.text, point: result.point, report: result.report, finalReview: result.finalReview, providerId } });
+            return withheld;
+          }
+          emit({ stage: 'complete', synthesisStatus: 'complete' });
+          return { ...evaluation, gate, synthesis: { ...synthesis, confirmed: true } };
+        }
         emit({ stage: 'complete', synthesisStatus: 'complete' });
         return { ...evaluation, synthesis };
       } catch (error) {
@@ -336,8 +460,8 @@ function createSynthesizedEvaluation({ evaluate, getOpinion, getStructured }) {
     }
     if (signal?.aborted) throw canceled();
     emit({ stage: 'complete', synthesisStatus: 'error' });
-    return { ...evaluation, synthesis: { version: 2, status: 'error', error: '검증 결과를 통합한 최종 의견을 작성하지 못했습니다. JEV 재평가와 검증 의견을 확인한 후 다시 시도해 주세요.', sourceProviderIds, elapsedMs: Date.now() - started, attempts } };
+    return { ...evaluation, ...(gated ? { gate: noReportGate() } : {}), synthesis: { version: 2, status: 'error', error: '검증 결과를 통합한 최종 의견을 작성하지 못했습니다. JEV 재평가와 검증 의견을 확인한 후 다시 시도해 주세요.', sourceProviderIds, elapsedMs: Date.now() - started, attempts } };
   };
 }
 
-module.exports = { createSynthesizedEvaluation, REVIEW_TARGET, MAX_REPORT_REPAIRS };
+module.exports = { createSynthesizedEvaluation, REVIEW_TARGET, MAX_REPORT_REPAIRS, MAX_QUALITY_ROUNDS, qualityComments };
