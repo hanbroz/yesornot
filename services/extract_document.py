@@ -1,11 +1,16 @@
 """Bounded text extraction only: never execute macros, scripts, or formulae."""
 import json
 import os
+import re
 import sys
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 
-LIMIT = 12000
+# The whole document is read; this cap only guards against pathological files.
+LIMIT = 400000
+MAX_PDF_PAGES = 500
+PDF_SECONDS = 90
 XML_LIMIT = 12 * 1024 * 1024
 TOTAL_XML_LIMIT = 25 * 1024 * 1024
 
@@ -124,13 +129,27 @@ def pdf(file):
     count = len(reader.pages)
     missing = 0
     extracted = False
-    for index in range(min(count, 40)):
+    read = 0
+    # Layout mode is slow on huge PDFs; stop before the app's 120 second limit and keep what was read.
+    deadline = time.monotonic() + PDF_SECONDS
+    for index in range(min(count, MAX_PDF_PAGES)):
+        if time.monotonic() > deadline:
+            break
+        read = index + 1
         page = reader.pages[index]
         # Bound decompressed page streams before invoking the text parser.
         contents = page.get_contents()
         if contents is not None and len(contents.get_data()) > XML_LIMIT:
             raise DocumentError("DOCUMENT_UNSAFE")
-        text = page.extract_text() or ""
+        # Layout mode keeps words on their lines; plain mode can emit one word per line.
+        try:
+            text = page.extract_text(extraction_mode="layout") or ""
+        except Exception:
+            text = ""
+        if not text.strip():
+            text = page.extract_text() or ""
+        text = re.sub(r"[ \t]{3,}", "  ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
         if not text.strip():
             missing += 1
         else:
@@ -138,12 +157,12 @@ def pdf(file):
         if not collected.add("\n[PDF " + str(index + 1) + "쪽]\n" + text):
             break
     if not extracted:
-        raise DocumentError("PDF_OCR_REQUIRED")
-    if count > 40:
+        raise DocumentError("PDF_TOO_SLOW" if read < min(count, MAX_PDF_PAGES) else "PDF_OCR_REQUIRED")
+    if read < count:
         collected.truncated = True
     warnings = ["PDF의 텍스트만 읽었으며 이미지·표 배치는 원문과 다를 수 있습니다."]
-    if count > 40:
-        warnings.append("총 " + str(count) + "쪽 중 앞 40쪽까지만 읽었습니다.")
+    if read < count:
+        warnings.append("총 " + str(count) + "쪽 중 앞 " + str(read) + "쪽까지만 읽었습니다.")
     if missing:
         warnings.append("읽은 페이지 중 " + str(missing) + "쪽은 텍스트가 없어 OCR이 필요할 수 있습니다.")
     return collected.result(" ".join(warnings))

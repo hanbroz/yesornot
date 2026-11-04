@@ -435,3 +435,69 @@ test('the GitHub researcher alone receives the curated resource list and its rev
   assert.ok(result.sources.some(item => item.kind === 'github'));
   for (const context of [result.context, result.debateContext]) assert.match(context, /GitHub 공개 리소스 검토[^]*gstack office-hours/);
 });
+
+test('a long attachment is read in parts and every part reaches the digest used by later stages', async () => {
+  const reads = [];
+  const service = createResearchService({ providers: ['claude', 'codex'], judgePreparation: async () => ({ items: [] }), verifySources: async () => [],
+    getStructured: async (id, prompt) => {
+      const part = JSON.parse(prompt.split('DOCUMENT_PART_JSON: ')[1]);
+      reads.push({ id, part: part.part, of: part.of });
+      return { data: { notes: `${part.part}부분 핵심 수치 ${part.text.length}자` } };
+    } });
+  const text = Array.from({ length: 30 }, (_, index) => `${index + 1}장 매출 목표 ${index + 1}억 원\n`.repeat(100)).join('\n\n');
+  const [doc, small] = await service.digestDocuments([{ id: 'a', name: '전략서.pdf', text, size: 1 }, { id: 'b', name: 'memo.txt', text: '짧은 메모', size: 1 }]);
+  const parts = reads.length;
+  assert.ok(parts >= Math.ceil(text.length / 10000));
+  assert.deepEqual([...new Set(reads.map(row => row.id))].sort(), ['claude', 'codex']);
+  for (let index = 1; index <= parts; index++) assert.ok(doc.digest.includes(`[${index}/${parts}부분]`));
+  assert.match(doc.digest, new RegExp(`전체 ${text.length.toLocaleString('ko-KR')}자를 ${parts}부분으로 나눠 모두 읽고`));
+  assert.equal(small.digest, undefined);
+  assert.equal(doc.text, text);
+});
+
+test('a shortened digest still keeps a piece of every part instead of only the first parts', () => {
+  const { fitDigest } = require('../services/research.cjs');
+  const digest = '[전체 300,000자를 31부분으로 나눠 모두 읽고 정리한 내용]\n' + Array.from({ length: 31 }, (_, index) => `[${index + 1}/31부분]\n${index + 1}부분 결론 ` + '가'.repeat(400)).join('\n');
+  const fitted = fitDigest(digest, 5000);
+  assert.ok(fitted.length <= 5000);
+  for (let index = 1; index <= 31; index++) assert.ok(fitted.includes(`[${index}/31부분]\n${index}부분 결론`), `part ${index}`);
+});
+
+test('a part one AI fails to read is retried on another AI, and a part no AI reads is reported', async () => {
+  const calls = [];
+  const service = createResearchService({ providers: ['claude', 'codex'], judgePreparation: async () => ({ items: [] }), verifySources: async () => [],
+    getStructured: async (id, prompt) => {
+      const part = JSON.parse(prompt.split('DOCUMENT_PART_JSON: ')[1]);
+      calls.push({ id, part: part.part });
+      if (id === 'claude' || part.part === 2) throw new Error('rate limited');
+      return { data: { notes: `${part.part}부분 요약` } };
+    } });
+  const text = Array.from({ length: 3 }, (_, index) => `${index + 1}장 내용\n`.repeat(1500)).join('\n\n');
+  const [doc] = await service.digestDocuments([{ id: 'a', name: '전략서.pdf', text, size: 1 }]);
+  assert.ok(calls.some(call => call.id === 'claude' && call.part === 1) && calls.some(call => call.id === 'codex' && call.part === 1));
+  assert.match(doc.digest, /\[1\/\d+부분\]\n1부분 요약/);
+  assert.match(doc.digest, /\[2\/\d+부분\]\n\[AI 요약 실패 · 원문 앞부분\] 2장 내용|\[2\/\d+부분\]\n\[AI 요약 실패/);
+  assert.match(doc.warning, /1부분은 AI가 읽지 못해/);
+});
+
+test('a digest squeezed for a small budget never grows past it and still labels every part', () => {
+  const { fitDigest } = require('../services/research.cjs');
+  const digest = '[전체 400,000자를 67부분으로 나눠 모두 읽고 정리한 내용]\n' + Array.from({ length: 67 }, (_, index) => `[${index + 1}/67부분]\n` + '나'.repeat(170)).join('\n');
+  for (const size of [1003, 1683, 3000]) assert.ok(fitDigest(digest, size).length <= size, `size ${size}`);
+  const fitted = fitDigest(digest, 1683);
+  for (let index = 1; index <= 67; index++) assert.ok(fitted.includes(`[${index}/67부분]`), `part ${index}`);
+});
+
+test('a long digest also gets a short brief written from every part for the smallest contexts', async () => {
+  let briefInput;
+  const service = createResearchService({ providers: ['claude'], judgePreparation: async () => ({ items: [] }), verifySources: async () => [],
+    getStructured: async (_id, prompt) => {
+      const part = JSON.parse(prompt.split('DOCUMENT_PART_JSON: ')[1]);
+      if (part.part === 0) { briefInput = part.text; return { data: { notes: '전체 핵심 요약' } }; }
+      return { data: { notes: `${part.part}부분 ` + '다'.repeat(900) } };
+    } });
+  const text = Array.from({ length: 12 }, (_, index) => `${index + 1}장\n`.repeat(3000)).join('\n\n');
+  const [doc] = await service.digestDocuments([{ id: 'a', name: '전략서.pdf', text, size: 1 }]);
+  assert.equal(doc.brief, '전체 핵심 요약');
+  assert.equal(briefInput, doc.digest);
+});

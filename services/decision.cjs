@@ -9,8 +9,17 @@ const MAX_CONFIDENCE_CYCLES = 2;
 function createDecisionService({ providers, getOpinion, evaluate, store, getApiKey, cwd, researchService, onEvent = () => {} }) {
   let current = null;
   const emit = (run, type = 'update') => onEvent({ runId: run.record.id, type, record: structuredClone(run.record) });
+  // Long attachments are read part by part once, before any stage uses them.
+  async function digest(run, settings) {
+    if (!researchService?.digestDocuments || !run.documents.length) return;
+    run.documents = await researchService.digestDocuments(run.documents, { cwd, signal: run.controller.signal, timeoutMs: settings.timeoutMs,
+      onProgress: progress => { run.record.researchProgress = progress; emit(run); } });
+    run.record.intakeDocuments = structuredClone(run.documents);
+    run.record.attachments = run.documents.map(({ id, name, size, truncated, warning }) => ({ id, name, size, truncated, warning }));
+  }
   async function prepare(run, settings) {
     try {
+      await digest(run, settings);
       run.record.preparation = await researchService.prepare({
         question: run.record.question, attachments: run.documents, apiKey: getApiKey(), model: settings.model, cwd,
         signal: run.controller.signal, timeoutMs: settings.timeoutMs,
@@ -40,6 +49,7 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
   async function interview(run, settings) {
     const prep = run.record.preparation;
     try {
+      await digest(run, settings);
       prep.answeredQuestions = [...(prep.answeredQuestions || []), ...(prep.questions || [])];
       prep.questions = [];
       // Records saved before multi-round interviews count their first questionnaire as round 1.
@@ -243,7 +253,10 @@ function createDecisionService({ providers, getOpinion, evaluate, store, getApiK
         !questions.some(question => question.id === id) || typeof value !== 'string' || value.length > 4000)) throw new Error('사전 답변 형식을 확인해 주세요. 항목당 4,000자까지 입력할 수 있습니다.');
       if (questions.some(question => question.required && !answers[question.id]?.trim())) throw new Error('필수 사전 질문에 답해 주세요. 알 수 없다면 모름이라고 적어 주세요.');
       run.record.answers = { ...(run.record.answers || {}), ...structuredClone(answers) };
-      if (attachments) run.documents = structuredClone(attachments);
+      if (attachments) run.documents = structuredClone(attachments).map(document => {
+        const previous = run.documents.find(item => item.id === document.id && item.text === document.text);
+        return previous?.digest && !document.digest ? { ...document, digest: previous.digest, ...(previous.brief ? { brief: previous.brief } : {}), ...(previous.warning ? { warning: previous.warning } : {}) } : document;
+      });
       run.record.intakeDocuments = structuredClone(run.documents);
       run.record.attachments = run.documents.map(({ id, name, size, truncated, warning }) => ({ id, name, size, truncated, warning }));
       run.record.status = researchService?.reassess ? 'preparing' : 'researching';

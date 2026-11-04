@@ -40,3 +40,13 @@ test('optional Gemini model setting is validated and kept only when present',()=
  assert.deepEqual(validateSettings({model:'jev-latest',timeoutMs:180000,geminiModel:'gemini-2.5-flash'}),{model:'jev-latest',timeoutMs:180000,geminiModel:'gemini-2.5-flash'});
  assert.throws(()=>validateSettings({model:'jev-latest',timeoutMs:180000,geminiModel:'https://attacker'}));
 });
+test('a finished record drops the full attachment text, a waiting one keeps it to resume',async t=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'yesorno-store-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ const store=createStore(dir);await store.load();
+ const docs=[{id:randomUUID(),name:'plan.md',size:1,text:'본문'.repeat(1000),truncated:false}];
+ const waiting={id:randomUUID(),question:'대기',status:'awaiting_input',opinions:[],intakeDocuments:docs};
+ const done={id:randomUUID(),question:'완료',status:'complete',opinions:[],intakeDocuments:docs};
+ await store.saveRecord(waiting);await store.saveRecord(done);
+ const [savedDone,savedWaiting]=store.snapshot().history;
+ assert.equal(savedDone.intakeDocuments,undefined);assert.deepEqual(savedWaiting.intakeDocuments,docs);
+});

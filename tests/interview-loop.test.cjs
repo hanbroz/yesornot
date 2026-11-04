@@ -221,3 +221,23 @@ test('moving on below the target records why', async () => {
   assert.deepEqual(scores, [{ score: 60, reason: 'NO_QUESTIONS' }]);
   assert.equal(researched.length, 0);
 });
+
+test('a long attachment is read once; answering the next round does not read it again', async () => {
+  const digested = [];
+  const document = { id: 'a', name: '전략서.md', size: 1, truncated: false, text: '본문\n'.repeat(20000) };
+  const withDigest = createDecisionService({
+    providers: [{ id: 'claude', name: 'Claude' }], getApiKey: () => 'test-key', store: { saveRecord: async () => {} },
+    researchService: {
+      digestDocuments: async documents => { digested.push(documents.filter(item => !item.digest).length); return documents.map(item => item.digest ? item : { ...item, digest: '요약' }); },
+      prepare: async () => preparation(),
+      reassess: async input => ({ round: input.round, score: 70, assessments: [], questions: [{ id: `r${input.round}q1`, question: '추가', required: true }] }),
+      research: async () => ({ status: 'complete', sources: [], context: '' }),
+    },
+    getOpinion: async id => ({ providerId: id, status: 'success', text: 'x' }), evaluate: async () => ({}),
+  });
+  const { runId } = withDigest.start({ question: '이직해도 될까요?', attachments: [document] }, settings);
+  await withDigest.wait();
+  withDigest.continue({ runId, answers: { q1: '모름' }, attachments: [structuredClone(document)] });
+  await withDigest.wait();
+  assert.deepEqual(digested, [1, 0]);
+});

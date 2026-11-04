@@ -52,16 +52,15 @@ test('unsupported, binary and large files fail visibly and no partial batch is r
   await assert.rejects(createAttachmentService({ chooseFiles: async () => Array(6).fill(large) }).pick(), { code: 'ATTACHMENT_LIMIT' });
 });
 
-test('all selected documents retain an explicit share of the 36000-character budget', async t => {
+test('every selected document is kept whole, with no per-file or total character cut', async t => {
   const files = [];
   for (let index = 0; index < 5; index++) files.push(await fixture(t, index + '.txt', String(index).repeat(18000)));
   const service = createAttachmentService({ chooseFiles: async () => files });
   const selected = await service.pick();
-  assert.ok(selected.every(item => item.chars <= 12000 && item.truncated && item.warning));
+  assert.ok(selected.every(item => item.chars === 18000 && !item.truncated && !item.warning));
   const resolved = service.resolve(selected.map(item => item.id));
   assert.equal(resolved.length, 5);
-  assert.ok(resolved.reduce((sum, item) => sum + item.text.length, 0) <= 36000);
-  assert.ok(resolved.every(item => item.text.includes('생략') && item.warning.includes('36,000')));
+  assert.ok(resolved.every((item, index) => item.text === String(index).repeat(18000)));
   assert.equal(service.metadata(selected.map(item => item.id))[0].text, undefined);
 });
 
@@ -77,7 +76,7 @@ test('extraction failure never exposes subprocess output or environment secrets'
     observed = { command, args, options };
     return { exitCode: 0, stdout: JSON.stringify({ ok: true, text: 'extracted' }) };
   } });
-  assert.equal(observed.options.timeoutMs, 30000);
+  assert.equal(observed.options.timeoutMs, 120000);
   assert.ok(!observed.options.env.GEMINI_API_KEY);
   assert.equal(observed.args[0], '-I');
 });
@@ -108,11 +107,11 @@ test('remember rejects forged or excessive saved documents atomically', () => {
     [{ ...valid(), name: '..' }], [{ ...valid(), path: 'C:\\private.txt' }],
     [{ ...valid(), size: 5 * 1024 * 1024 + 1 }], [{ ...valid(), size: NaN }],
     [{ ...valid(), size: -1 }], [{ ...valid(), size: 0.5 }],
-    [{ ...valid(), text: 'x'.repeat(12001) }], [{ ...valid(), text: ' ' }],
+    [{ ...valid(), text: 'x'.repeat(400001) }], [{ ...valid(), digest: 'x'.repeat(20001) }], [{ ...valid(), text: ' ' }],
     [{ ...valid(), truncated: 'false' }], [{ ...valid(), warning: {} }],
     [{ ...valid(), warning: 'x'.repeat(701) }],
     Array.from({ length: 3 }, () => ({ ...valid(), size: 4 * 1024 * 1024 })),
-    Array.from({ length: 4 }, () => ({ ...valid(), text: 'x'.repeat(10000) })),
+    Array.from({ length: 4 }, () => ({ ...valid(), text: 'x'.repeat(400000) })),
   ];
   const duplicate = valid();
   invalidBatches.push([duplicate, duplicate]);
@@ -158,4 +157,12 @@ test('real Python extracts DOCX and cached XLSX values, rejects image PDFs and e
   assert.match(pdf.text, /Actual PDF evidence/);
   await assert.rejects(extractDocument(path.join(directory, 'image.pdf')), /OCR/);
   await assert.rejects(extractDocument(path.join(directory, 'unsafe.docx')), /압축 해제 크기 또는 구조/);
+});
+
+test('the installed app runs the document extractor from outside app.asar', async () => {
+  const path = require('node:path');
+  let script;
+  await extractDocument('C:/docs/plan.pdf', { processRunner: async (_command, args) => { script = args[3]; return { exitCode: 0, stdout: JSON.stringify({ ok: true, text: 'x' }) }; } });
+  assert.equal(path.basename(script), 'extract_document.py');
+  assert.ok(!/app\.asar[\\/]/.test(script) || /app\.asar\.unpacked/.test(script));
 });

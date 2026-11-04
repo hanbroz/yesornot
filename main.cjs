@@ -313,7 +313,7 @@ if (startup) app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details,callback) => callback({ cancel:!details.url.startsWith(pathToFileURL(__dirname + path.sep).href) && !details.url.startsWith('devtools:') }));
   service = createDecisionService({ providers:cli.PROVIDERS, getOpinion:(id, question, options) => id === 'gemini' ? gemini.getOpinion(question, { ...options, apiKey:geminiKey, model:geminiModel }) : getDebatedOpinion(id, question, options), evaluate:evaluateAndSynthesize, researchService, store, getApiKey:() => apiKey, cwd:path.join(userData,'cli-workspace'), onEvent:event => {
     if (event.type === 'complete') { lastCompletedRecord = structuredClone(event.record); rememberUsageLimits(event.record); }
-    if (window && !window.isDestroyed()) window.webContents.send('decision:event', event);
+    if (window && !window.isDestroyed()) { const { intakeDocuments, ...record } = event.record; window.webContents.send('decision:event', { ...event, record }); }
   } });
   const savedIntake = store.snapshot().history.find(record => record.status === 'awaiting_input' && record.preparation);
   if (savedIntake) {

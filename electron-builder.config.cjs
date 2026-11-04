@@ -5,6 +5,8 @@ module.exports = {
   productName: 'YES or NO',
   directories: { output: 'dist', buildResources: 'assets' },
   asar: true,
+  // Python cannot read files inside app.asar, so the document extractor stays outside it.
+  asarUnpack: ['services/*.py'],
   npmRebuild: false,
   // Production dependencies and package.json are added by electron-builder.
   // Everything else comes from this explicit runtime allowlist.

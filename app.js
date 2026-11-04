@@ -123,11 +123,13 @@ function updateRunActivity() {
   let detail = '사용 가능한 AI 연결을 확인하고 있습니다.';
   if (status === 'preparing') {
     const phase = progress?.phase;
-    title = phase === 'consolidating-intake' ? '유사한 질문을 합치고 있습니다.'
+    title = phase === 'digesting-documents' ? '첨부 자료를 처음부터 끝까지 나눠 읽고 있습니다.'
+      : phase === 'consolidating-intake' ? '유사한 질문을 합치고 있습니다.'
       : phase === 'judging-preparation' ? 'JEV가 추가 질문과 자료 요청을 평가하고 있습니다.'
       : phase === 'assessing-readiness' ? '답변을 반영해 인터뷰 준비도를 다시 평가하고 있습니다.'
       : 'AI가 질문과 자료를 검토하고 있습니다.';
-    detail = phase === 'planning' ? (count ? 'AI 사전 검토 응답 ' + count + ' 완료 · ' : '') + '남은 AI의 응답을 기다리고 있습니다.'
+    detail = phase === 'digesting-documents' ? (count ? '자료 조각 ' + count + ' 읽음 · ' : '') + '긴 자료는 여러 부분으로 나눠 빠짐없이 정리합니다.'
+      : phase === 'planning' ? (count ? 'AI 사전 검토 응답 ' + count + ' 완료 · ' : '') + '남은 AI의 응답을 기다리고 있습니다.'
       : phase === 'consolidating-intake' ? (Number.isInteger(progress?.candidates) ? '추가 질문 후보 ' + progress.candidates + '개 · ' : '') + '중복을 정리하고 질문을 명확하게 다듬고 있습니다.'
       : phase === 'judging-preparation' ? '확인이 필요한 개인 조건과 공개 조사로 찾을 자료를 구분하고 있습니다.'
       : phase === 'assessing-readiness' ? '준비도가 90% 미만이면 필요한 정보를 한 번 더 여쭙니다.'

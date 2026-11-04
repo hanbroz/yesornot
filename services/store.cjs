@@ -74,6 +74,7 @@ function createStore(directory) {
     saveRecord(record) {
       if (!validRecord(record)) throw new Error('기록 형식 오류');
       const copy = structuredClone(record);
+      if (copy.status !== 'awaiting_input') delete copy.intakeDocuments;
       return write(s => { s.history = [copy, ...s.history.filter(r => r.id !== copy.id)].slice(0,100); });
     }
   };

@@ -8,8 +8,9 @@ const { runProcess, cleanEnvironment } = require('./cli.cjs');
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
-const MAX_CHARS = 12000;
-const MAX_TOTAL_CHARS = 36000;
+// Whole documents are kept; long ones are read part by part (research digestDocuments).
+const MAX_CHARS = 400000;
+const MAX_TOTAL_CHARS = 1200000;
 const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.csv', '.json', '.html', '.htm', '.xml', '.tsv', '.log']);
 const DOCUMENT_EXTENSIONS = new Set(['.pdf', '.docx', '.xlsx']);
 const TRUNCATION = '\n[첨부 자료 길이 제한으로 이후 내용이 생략되었습니다.]';
@@ -42,8 +43,10 @@ function markupText(text) {
 async function extractDocument(file, { processRunner = runProcess, pythonCommand = process.env.YESORNOT_PYTHON || 'python' } = {}) {
   let result;
   try {
-    result = await processRunner(pythonCommand, ['-I', '-X', 'utf8', path.join(__dirname, 'extract_document.py'), file], {
-      env: { ...cleanEnvironment(), PYTHONIOENCODING: 'utf-8' }, timeoutMs: 30000, maxOutputBytes: 200000,
+    // In the installed app the script is unpacked next to app.asar (asarUnpack).
+    const script = path.join(__dirname, 'extract_document.py').replace(/app\.asar([\\/])/, 'app.asar.unpacked$1');
+    result = await processRunner(pythonCommand, ['-I', '-X', 'utf8', script, file], {
+      env: { ...cleanEnvironment(), PYTHONIOENCODING: 'utf-8' }, timeoutMs: 120000, maxOutputBytes: 8 * 1024 * 1024,
     });
   } catch (error) {
     if (error?.code === 'ENOENT') throw failure('ATTACHMENT_PYTHON_REQUIRED', 'PDF·Word·Excel 자료를 읽으려면 로컬 Python이 필요합니다. Python을 설치하거나 내용을 텍스트로 첨부해 주세요.');
@@ -56,11 +59,12 @@ async function extractDocument(file, { processRunner = runProcess, pythonCommand
       PDF_LIBRARY_REQUIRED: 'PDF 읽기에 필요한 Python pypdf가 없습니다. pypdf를 설치하거나 내용을 텍스트로 첨부해 주세요.',
       PDF_OCR_REQUIRED: '이 PDF에서 읽을 수 있는 텍스트가 없습니다. 이미지 PDF는 OCR 처리 후 첨부해 주세요.',
       PDF_ENCRYPTED: '암호로 보호된 PDF입니다. 암호를 해제한 사본을 첨부해 주세요.',
+      PDF_TOO_SLOW: '이 PDF는 읽는 데 너무 오래 걸려 텍스트를 가져오지 못했습니다. 페이지를 나눠 첨부해 주세요.',
       DOCUMENT_UNSAFE: '문서의 압축 해제 크기 또는 구조가 허용 범위를 초과합니다. 필요한 내용을 텍스트로 첨부해 주세요.',
     };
     throw failure('ATTACHMENT_EXTRACTION_FAILED', messages[value?.code] || '문서의 텍스트를 읽을 수 없습니다. 문서 형식을 확인하거나 텍스트로 첨부해 주세요.');
   }
-  if (typeof value.text !== 'string' || value.text.length > 20000) throw failure('ATTACHMENT_EXTRACTION_FAILED', '문서 추출 응답 형식이 올바르지 않습니다.');
+  if (typeof value.text !== 'string' || value.text.length > MAX_CHARS + 100) throw failure('ATTACHMENT_EXTRACTION_FAILED', '문서 추출 응답 형식이 올바르지 않습니다.');
   return { text: value.text, truncated: value.truncated === true, warning: typeof value.warning === 'string' ? value.warning.slice(0, 700) : undefined };
 }
 
@@ -114,7 +118,7 @@ function createAttachmentService({ chooseFiles, extract = extractDocument } = {}
           : await extract(file);
         if (typeof extracted?.text !== 'string' || !extracted.text.trim()) throw failure('ATTACHMENT_EMPTY', '첨부한 문서에 읽을 수 있는 텍스트가 없습니다. 이미지 문서는 OCR 처리 후 첨부해 주세요.');
         const truncated = extracted.truncated === true || extracted.text.length > MAX_CHARS;
-        const warning = [extracted.warning, truncated ? '파일당 최대 12,000자까지만 분석합니다. 생략된 내용은 판단 근거에 포함되지 않습니다.' : ''].filter(Boolean).join(' ');
+        const warning = [extracted.warning, truncated ? '문서가 매우 커서 앞부분 400,000자(PDF는 500쪽)까지만 읽었습니다.' : ''].filter(Boolean).join(' ');
         selected.push({ id: randomUUID(), name: path.basename(file).replace(/[\u0000-\u001f]/g, '').slice(0, 240), size, text: bounded(extracted.text.trim(), MAX_CHARS), truncated, ...(warning ? { warning } : {}) });
       }
       if (documents.size + selected.length > 100) throw failure('ATTACHMENT_LIMIT', '이 실행에서 첨부한 파일이 너무 많습니다. 앱을 다시 실행한 후 필요한 파일을 선택해 주세요.');
@@ -126,7 +130,7 @@ function createAttachmentService({ chooseFiles, extract = extractDocument } = {}
       if (!Array.isArray(savedDocuments) || savedDocuments.length > 5) throw invalid();
       const restored = [];
       const seen = new Set();
-      const allowedKeys = new Set(['id', 'name', 'size', 'text', 'truncated', 'warning']);
+      const allowedKeys = new Set(['id', 'name', 'size', 'text', 'truncated', 'warning', 'digest', 'brief']);
       let totalBytes = 0;
       let totalChars = 0;
       for (const doc of savedDocuments) {
@@ -135,7 +139,9 @@ function createAttachmentService({ chooseFiles, extract = extractDocument } = {}
           typeof doc.name !== 'string' || !doc.name.trim() || doc.name.length > 240 || /[\\/\u0000-\u001f]/.test(doc.name) || ['.', '..'].includes(doc.name) ||
           !Number.isSafeInteger(doc.size) || doc.size < 0 || doc.size > MAX_FILE_BYTES ||
           typeof doc.text !== 'string' || !doc.text.trim() || doc.text.length > MAX_CHARS || typeof doc.truncated !== 'boolean' ||
-          (doc.warning !== undefined && (typeof doc.warning !== 'string' || doc.warning.length > 700))) throw invalid();
+          (doc.warning !== undefined && (typeof doc.warning !== 'string' || doc.warning.length > 700)) ||
+          (doc.digest !== undefined && (typeof doc.digest !== 'string' || doc.digest.length > 20000)) ||
+          (doc.brief !== undefined && (typeof doc.brief !== 'string' || doc.brief.length > 6000))) throw invalid();
         totalBytes += doc.size;
         totalChars += doc.text.length;
         if (totalBytes > MAX_TOTAL_BYTES || totalChars > MAX_TOTAL_CHARS) throw invalid();
@@ -143,7 +149,7 @@ function createAttachmentService({ chooseFiles, extract = extractDocument } = {}
         if (existing && ['name', 'size', 'text', 'truncated', 'warning'].some(key => existing[key] !== doc[key])) throw invalid();
         seen.add(doc.id);
         restored.push({ id: doc.id, name: doc.name, size: doc.size, text: doc.text, truncated: doc.truncated,
-          ...(doc.warning ? { warning: doc.warning } : {}) });
+          ...(doc.warning ? { warning: doc.warning } : {}), ...(doc.digest ? { digest: doc.digest } : {}), ...(doc.brief ? { brief: doc.brief } : {}) });
       }
       if (documents.size + restored.filter(doc => !documents.has(doc.id)).length > 100) throw invalid();
       for (const doc of restored) documents.set(doc.id, doc);
@@ -152,12 +158,9 @@ function createAttachmentService({ chooseFiles, extract = extractDocument } = {}
     resolve(ids = []) {
       const selected = validateIds(ids).map(id => documents.get(id));
       if (selected.reduce((sum, doc) => sum + doc.size, 0) > MAX_TOTAL_BYTES) throw failure('ATTACHMENT_SIZE_LIMIT', '첨부 자료의 총 크기는 10MB까지 사용할 수 있습니다.');
-      // Divide the total budget fairly so no selected document silently disappears.
-      const budget = selected.length ? Math.min(MAX_CHARS, Math.floor(MAX_TOTAL_CHARS / selected.length)) : MAX_CHARS;
-      return selected.map(doc => {
-        if (doc.text.length <= budget) return { ...doc };
-        return { ...doc, text: bounded(doc.text, budget), truncated: true, warning: [doc.warning, '첨부 전체 36,000자 제한에 맞추어 일부 내용이 추가 생략되었습니다.'].filter(Boolean).join(' ') };
-      });
+      if (selected.reduce((sum, doc) => sum + doc.text.length, 0) > MAX_TOTAL_CHARS) throw failure('ATTACHMENT_SIZE_LIMIT', '첨부 자료의 글자 수 합계는 1,200,000자까지 사용할 수 있습니다.');
+      // Full text is passed on; long documents are digested part by part before use.
+      return selected.map(doc => ({ ...doc }));
     },
     metadata(ids = []) { return this.resolve(ids).map(metadata); },
   };
