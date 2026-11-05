@@ -158,6 +158,12 @@ function pickQuestions(candidates, selected, readiness) {
     return { ...candidate, required: choice === 'ASK_REQUIRED', choice, confidence };
   });
 }
+// When JEV cannot approve the question structure, the AIs' own questions are asked as written.
+function aiProposedQuestions(candidates, prefix = '') {
+  const seen = new Set();
+  return candidates.filter(candidate => !seen.has(questionKey(candidate.question)) && seen.add(questionKey(candidate.question))).slice(0, 8)
+    .map((candidate, index) => ({ id: `${prefix}q${index + 1}`, question: candidate.question, why: candidate.why, material: candidate.material, required: candidate.required, providerIds: candidate.providerIds, choice: 'AI_PROPOSED' }));
+}
 function interviewTranscript(preparation, answers) {
   return [...(preparation.answeredQuestions || []), ...(preparation.questions || [])].map(item => ({ id: item.id, question: clip(item.question, 400), answer: clip(answers?.[item.id] || '', 2000) }));
 }
@@ -371,7 +377,7 @@ function createResearchService({ providers, getStructured, judgePreparation, ver
       reviews.push({ round: round + 1, candidates: structuredClone(candidates), judgment: structuredClone(judgment) });
       const needsRepair = judgment.items.some(item => item.choice === 'SPLIT_REQUIRED') || judgment.intakeIntegrity?.choice === 'REPAIR_REQUIRED';
       if (!needsRepair) break;
-      if (round === 1) throw failure('INTAKE_ATOMICITY_FAILED', '복합 질문이나 원본 정보 누락이 남아 있어 질문지를 표시하지 않았습니다. 질문을 정리하지 못해 사전 검토를 중단했습니다.');
+      if (round === 1) throw Object.assign(failure('INTAKE_ATOMICITY_FAILED', '복합 질문이나 원본 정보 누락이 남아 있어 질문 구조를 확정하지 못했습니다.'), { judged: { candidates, consolidation, judgment, reviews } });
       const repaired = await consolidate({ question, attachments, sources: sourceCandidates, plans, cwd, signal, timeoutMs, onProgress, repair: { candidates, items: judgment.items, intakeIntegrity: judgment.intakeIntegrity } });
       candidates = repaired.candidates;
       consolidation = { ...repaired.consolidation, initial: consolidation, repaired: true };
@@ -514,10 +520,14 @@ function createResearchService({ providers, getStructured, judgePreparation, ver
       if (!plans.some(plan => plan.status === 'success')) throw failure('PREPARATION_FAILED', '사용 가능한 AI의 조사 계획을 얻지 못했습니다.');
       const sourceCandidates = candidatesFrom(plans), searches = mergeSearches(plans);
       const readiness = averageReadiness(plans);
-      const { candidates, consolidation, judgment, selected, reviews } = await judgeCandidates({ question, attachments, plans, sourceCandidates, apiKey, model, cwd, signal, timeoutMs, onProgress, total: ids.length });
-      const questions = pickQuestions(candidates, selected, readiness);
+      // JEV's refusal of the question structure must not end the run: the user still gets the AIs' questions.
+      const { candidates, consolidation, judgment, selected, reviews, judgeError } = await judgeCandidates({ question, attachments, plans, sourceCandidates, apiKey, model, cwd, signal, timeoutMs, onProgress, total: ids.length }).catch(error => {
+        if (error?.code !== 'INTAKE_ATOMICITY_FAILED' || !error.judged) throw error;
+        return { ...error.judged, judgeError: { code: safeCode(error), message: clip(error.message, 300) } };
+      });
+      const questions = judgeError ? aiProposedQuestions(sourceCandidates.filter(candidate => candidate.required || (readiness !== null && readiness < READINESS_TARGET))) : pickQuestions(candidates, selected, readiness);
       return { version: 1, plans, sourceCandidates, consolidation, candidates, questions, searches, judgment, readiness,
-        interview: { version: 1, target: READINESS_TARGET, maxRounds: MAX_INTERVIEW_ROUNDS, rounds: [{ round: 1, score: readiness, questionCount: questions.length }] },
+        interview: { version: 1, target: READINESS_TARGET, maxRounds: MAX_INTERVIEW_ROUNDS, rounds: [{ round: 1, score: readiness, questionCount: questions.length, ...(judgeError ? { judgeError } : {}) }] },
         intakeReview: { version: 1, policy: readiness !== null && readiness < READINESS_TARGET ? 'readiness-guided' : 'single-fact-essential-only', rounds: reviews }, attachments: attachmentMetadata(attachments) };
     },
     // Re-scores the case after the user's answers and returns the next round of questions, if any.
@@ -560,10 +570,7 @@ function createResearchService({ providers, getStructured, judgePreparation, ver
         if (signal?.aborted || error?.code === 'ABORTED') throw abortError(signal);
         // Below the target the interview must continue: if JEV cannot structure the
         // questions, ask the AIs' own (deduplicated) questions instead of skipping the round.
-        const seen = new Set();
-        const questions = sourceCandidates.filter(candidate => !seen.has(questionKey(candidate.question)) && seen.add(questionKey(candidate.question))).slice(0, 8)
-          .map((candidate, index) => ({ id: `r${round}q${index + 1}`, question: candidate.question, why: candidate.why, material: candidate.material, required: candidate.required, providerIds: candidate.providerIds, choice: 'AI_PROPOSED' }));
-        return { round, score, assessments, questions, judgeError: { code: safeCode(error), message: clip(error?.message || 'JEV 질문 정리 실패', 300) } };
+        return { round, score, assessments, questions: aiProposedQuestions(sourceCandidates, `r${round}`), judgeError: { code: safeCode(error), message: clip(error?.message || 'JEV 질문 정리 실패', 300) } };
       }
       const questions = pickQuestions(judged.candidates, judged.selected, score).map(item => ({ ...item, id: `r${round}${item.id}` }));
       return { round, score, assessments, questions, consolidation: judged.consolidation, judgment: judged.judgment };

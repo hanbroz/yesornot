@@ -48,9 +48,12 @@ test('optional, low-impact, supplied and public facts never interrupt the user w
   assert.deepEqual(result.judgment.items.map(row => row.choice), ['ASK_OPTIONAL','NOT_NEEDED','ALREADY_SUPPLIED','RESEARCH_PUBLIC','ASK_REQUIRED']);
 });
 
-test('a questionnaire is not published if compound items remain after the bounded repair', async () => {
+test('compound items left after the bounded repair fall back to the AI questions instead of ending the run', async () => {
   const state = setup({ judge: () => 'SPLIT_REQUIRED', rewrite: data => ({ questions: [{ sourceIds:[data.candidates[0].id], question:source.question, why:source.why, material:'' }] }) });
-  await assert.rejects(state.service.prepare({ question:'가상 질문' }), { code:'INTAKE_ATOMICITY_FAILED' });
+  const result = await state.service.prepare({ question:'가상 질문' });
+  assert.deepEqual(result.questions.map(row => [row.id, row.question, row.required, row.choice]), [['q1', source.question, true, 'AI_PROPOSED']]);
+  assert.equal(result.interview.rounds[0].judgeError.code, 'INTAKE_ATOMICITY_FAILED');
+  assert.ok(Array.isArray(result.judgment.items));
   assert.equal(state.judgments.length, 2);
   assert.equal(state.calls.filter(row => row.prompt.includes('INTAKE_CONSOLIDATION_DATA_JSON: ')).length, 1);
 });
@@ -76,7 +79,8 @@ test('partial loss of facts from a compound source cannot pass by merely reusing
     rewrite: data => ({ questions: [atomic(data).questions[0]] }),
     integrity: (_input, round) => round === 1 ? 'COMPLETE' : 'REPAIR_REQUIRED',
   });
-  await assert.rejects(state.service.prepare({ question:'가상 질문' }), { code:'INTAKE_ATOMICITY_FAILED' });
+  const result = await state.service.prepare({ question:'가상 질문' });
+  assert.equal(result.questions[0].choice, 'AI_PROPOSED');
   assert.equal(state.judgments.length, 2);
   assert.equal(state.judgments[1].candidates.length, 1);
   assert.deepEqual(state.judgments[1].candidates[0].sourceIds, ['r1']);
